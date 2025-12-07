@@ -337,7 +337,8 @@ export class GameController {
       this.renderer.setCombo(0, timestamp);
       this.renderer.drawCombo(timestamp);
       this.renderer.drawJudgment(timestamp);
-      this.renderer.drawTimingStats();
+      const totalSteps = this.state.chart.notes.length;
+      this.renderer.drawTimingStats(totalSteps, totalSteps);
     }
   }
 

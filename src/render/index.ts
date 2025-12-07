@@ -533,8 +533,10 @@ export class Renderer {
 
   /**
    * Draw per-direction timing stats with visual slider bars
+   * @param stepsRemaining - Number of notes not yet judged
+   * @param totalSteps - Total number of notes in the chart
    */
-  drawTimingStats(): void {
+  drawTimingStats(stepsRemaining: number = 0, totalSteps: number = 0): void {
     const statsX = this.columnX.right + LAYOUT.arrowSize / 2 + 40;
     // Always position at top of screen (not relative to receptor)
     const startY = this.height * 0.12;
@@ -547,8 +549,8 @@ export class Renderer {
     const panelX = statsX - panelPadding;
     const panelY = startY - 35;
     const panelWidth = barWidth + 110;
-    // Height includes: per-direction rows + global stats section
-    const panelHeight = DIRECTIONS.length * rowHeight + 160;
+    // Height includes: per-direction rows + global stats section + steps remaining
+    const panelHeight = DIRECTIONS.length * rowHeight + 185;
 
     this.ctx.save();
 
@@ -563,11 +565,19 @@ export class Renderer {
     this.roundRect(panelX, panelY, panelWidth, panelHeight, 10);
     this.ctx.stroke();
 
-    // Title
+    // Title with steps remaining
     this.ctx.font = '12px -apple-system, sans-serif';
     this.ctx.fillStyle = THEME.text.muted;
     this.ctx.textAlign = 'left';
     this.ctx.fillText('TIMING', statsX, startY - 5);
+
+    // Steps remaining (right-aligned in header)
+    if (totalSteps > 0) {
+      this.ctx.textAlign = 'right';
+      this.ctx.font = 'bold 12px -apple-system, sans-serif';
+      this.ctx.fillStyle = stepsRemaining === 0 ? THEME.accent.success : THEME.text.secondary;
+      this.ctx.fillText(`${stepsRemaining}/${totalSteps}`, statsX + barWidth + 45, startY - 5);
+    }
 
     for (let i = 0; i < DIRECTIONS.length; i++) {
       const dir = DIRECTIONS[i]!;
@@ -2135,7 +2145,9 @@ export class Renderer {
 
     // Draw timing stats (only in normal play, not autoplay)
     if (!autoplay) {
-      this.drawTimingStats();
+      const stepsRemaining = state.activeNotes.filter(n => !n.judged).length;
+      const totalSteps = state.chart.notes.length;
+      this.drawTimingStats(stepsRemaining, totalSteps);
     }
 
     if (autoplay) {
