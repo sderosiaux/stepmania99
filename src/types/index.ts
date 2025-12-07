@@ -58,7 +58,7 @@ export const JUDGMENT_MAINTAINS_COMBO: Record<JudgmentGrade, boolean> = {
   marvelous: true,
   perfect: true,
   great: true,
-  good: true,
+  good: false,  // Good breaks combo
   boo: false,
   miss: false,
 };
