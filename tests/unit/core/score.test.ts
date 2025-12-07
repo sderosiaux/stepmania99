@@ -79,11 +79,12 @@ describe('Score System', () => {
       expect(state.combo).toBe(1);
     });
 
-    it('increments combo on good', () => {
+    it('breaks combo on good (too inaccurate to maintain)', () => {
       let state = createScoreState(10);
+      state.combo = 50;
       state = applyJudgment(state, createJudgment('good'));
 
-      expect(state.combo).toBe(1);
+      expect(state.combo).toBe(0);
     });
 
     it('breaks combo on boo', () => {
