@@ -711,53 +711,6 @@ export class SongSelectScreen {
   }
 
   /**
-   * Update selection classes without rebuilding the entire DOM
-   */
-  private updateSelection(): void {
-    // Update pack selection
-    this.container.querySelectorAll('[data-pack]').forEach((el, i) => {
-      el.classList.toggle('selected', i === this.selectedPackIndex);
-    });
-
-    // Update song selection
-    this.container.querySelectorAll('[data-song]').forEach((el, i) => {
-      el.classList.toggle('selected', i === this.selectedSongIndex);
-    });
-
-    // Update difficulty selection
-    this.container.querySelectorAll('[data-diff-idx]').forEach((el, i) => {
-      el.classList.toggle('selected', i === this.selectedDifficultyIndex);
-    });
-
-    this.scrollSelectedIntoView();
-  }
-
-  /**
-   * Update only the chart details panel without full re-render
-   */
-  private updateChartDetails(): void {
-    const currentPack = this.packs[this.selectedPackIndex];
-    const currentSong = currentPack?.songs[this.selectedSongIndex];
-    const currentChart = currentSong?.charts[this.selectedDifficultyIndex];
-
-    const statsColumn = this.container.querySelector('.stats-column');
-    if (!statsColumn || !currentSong || !currentChart) return;
-
-    // Update just the chart details content (keeping the header)
-    const header = statsColumn.querySelector('.column-header');
-    if (header) {
-      statsColumn.innerHTML = '';
-      statsColumn.appendChild(header.cloneNode(true));
-
-      const detailsWrapper = document.createElement('div');
-      detailsWrapper.innerHTML = this.renderChartDetails(currentSong, currentChart);
-      statsColumn.appendChild(detailsWrapper.firstElementChild!);
-    }
-
-    this.drawGrooveRadar();
-  }
-
-  /**
    * No-op: 3D wheel handles positioning automatically via CSS transforms
    */
   private scrollSelectedIntoView(): void {
