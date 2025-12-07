@@ -1260,15 +1260,28 @@ export class Renderer {
       let noteX = this.columnX[note.direction];
 
       if (isGems) {
-        // Guitar Hero style: notes come from above (vanishing point) towards receptor at bottom
-        y = this.receptorY - timeDiff * pixelsPerMs;
+        // Guitar Hero style: notes come from vanishing point towards receptor
+        // Use proper 3D perspective so perceived speed is constant
 
-        // Perspective scaling: notes get smaller as they're further from receptor
+        // Calculate how far ahead the note is in "time space" (0 = at receptor, 1 = at horizon)
+        const maxVisibleTime = perspectiveRange / pixelsPerMs;
+        const normalizedTime = Math.min(1, Math.max(0, timeDiff / maxVisibleTime));
+
+        // Apply perspective projection: objects far away move slower on screen
+        // This counters the scale change to maintain constant perceived velocity
+        // Using inverse perspective: screenT = t / (1 + t * strength)
+        const perspectiveStrength = 2.5; // Higher = more perspective depth
+        const perspectiveT = normalizedTime / (1 + normalizedTime * perspectiveStrength);
+
+        // Map to screen Y position
+        y = this.receptorY - perspectiveT * perspectiveRange;
+
+        // Calculate scale based on screen position (not time)
         if (y < this.receptorY && perspectiveRange > 0) {
           const distanceFromReceptor = this.receptorY - y;
           const normalizedDistance = Math.min(1, distanceFromReceptor / perspectiveRange);
 
-          // Scale from 1.0 (at receptor) to horizonScale (at vanishing point) - matches lane convergence
+          // Scale from 1.0 (at receptor) to horizonScale (at vanishing point)
           const perspectiveScale = 1 - normalizedDistance * (1 - horizonScale);
           scale = perspectiveScale;
 
@@ -1461,14 +1474,23 @@ export class Renderer {
     const vanishingY = this.height * 0.35;
     const horizonScale = 0.15;
     const perspectiveRange = this.receptorY - vanishingY;
+    const perspectiveStrength = 2.5; // Must match drawNotes
 
     // Calculate time differences
     const headTimeDiff = note.time - currentTime;
     const tailTimeDiff = (note.endTime ?? note.time) - currentTime;
 
-    // Calculate Y positions (gems: notes come from above)
-    let headY = this.receptorY - headTimeDiff * pixelsPerMs;
-    let tailY = this.receptorY - tailTimeDiff * pixelsPerMs;
+    // Helper to convert time to screen Y with perspective
+    const maxVisibleTime = perspectiveRange / pixelsPerMs;
+    const timeToScreenY = (timeDiff: number): number => {
+      const normalizedTime = Math.min(1, Math.max(0, timeDiff / maxVisibleTime));
+      const perspectiveT = normalizedTime / (1 + normalizedTime * perspectiveStrength);
+      return this.receptorY - perspectiveT * perspectiveRange;
+    };
+
+    // Calculate Y positions with perspective
+    let headY = timeToScreenY(headTimeDiff);
+    let tailY = timeToScreenY(tailTimeDiff);
 
     // If hold started, keep head locked at receptor
     if (holdState?.started && !holdState?.dropped) {
