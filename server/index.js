@@ -661,7 +661,10 @@ function endGame(room) {
 const server = createServer((req, res) => {
   // Health check endpoint
   if (req.url === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+    });
     res.end(JSON.stringify({
       status: 'ok',
       rooms: rooms.size,
