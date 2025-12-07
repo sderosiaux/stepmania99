@@ -534,7 +534,8 @@ export class Renderer {
    */
   drawTimingStats(): void {
     const statsX = this.columnX.right + LAYOUT.arrowSize / 2 + 40;
-    const startY = this.receptorY - 20;
+    // Always position at top of screen (not relative to receptor)
+    const startY = this.height * 0.12;
     const rowHeight = 36;
     const barWidth = 100;
     const barHeight = 8;
