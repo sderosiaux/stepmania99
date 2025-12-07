@@ -176,7 +176,10 @@ export class GameController {
       ended: false,
     };
 
-    this.scoreState = createScoreState(chart.notes.length);
+    // Count total judgments: tap notes count as 1, hold notes count as 2 (head + tail)
+    const holdCount = chart.notes.filter(n => n.type === 'hold').length;
+    const totalJudgments = chart.notes.length + holdCount;
+    this.scoreState = createScoreState(totalJudgments);
 
     // Reset timing stats and pause tracking for new game
     this.renderer.resetTimings();
