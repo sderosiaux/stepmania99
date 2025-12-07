@@ -305,11 +305,14 @@ export class GameController {
     this.renderer.drawReceptors(timestamp, new Set());
     this.renderer.drawCountdown(this.countdown.count);
 
-    // Show song info during countdown
+    // Show song info and timing panel during countdown
     if (this.state) {
       this.renderer.drawSongInfo(this.state.song.title, this.state.song.artist);
       this.renderer.drawScore(0);
       this.renderer.drawHealthBar(50);
+      this.renderer.setCombo(0, timestamp);
+      this.renderer.drawCombo(timestamp);
+      this.renderer.drawJudgment(timestamp);
     }
   }
 
