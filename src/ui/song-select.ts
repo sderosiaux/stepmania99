@@ -1398,19 +1398,39 @@ export class SongSelectScreen {
         cursor: pointer;
         transition: all 0.1s ease;
         margin-bottom: 0.25rem;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+        position: relative;
+      }
+
+      /* Curved separator line using pseudo-element that follows 3D transform */
+      .list-item::after,
+      .wheel-ghost::after {
+        content: '';
+        position: absolute;
+        left: 5%;
+        right: 5%;
+        bottom: -2px;
+        height: 1px;
+        background: linear-gradient(90deg,
+          transparent 0%,
+          rgba(255, 255, 255, 0.15) 15%,
+          rgba(255, 255, 255, 0.25) 50%,
+          rgba(255, 255, 255, 0.15) 85%,
+          transparent 100%
+        );
+        border-radius: 50%;
+        transform: scaleY(0.5);
       }
 
       /* Ghost items to simulate wheel continuity */
       .wheel-ghost {
         height: 52px;
         min-height: 52px;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.2);
         padding: 0.6rem 0.75rem;
         margin-bottom: 0.25rem;
         flex-shrink: 0;
         box-sizing: border-box;
         border-radius: 6px;
+        position: relative;
       }
 
       .list-item:hover { background: ${THEME.bg.tertiary}; }
