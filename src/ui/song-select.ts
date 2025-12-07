@@ -538,6 +538,9 @@ export class SongSelectScreen {
       <div class="song-select-4col">
         <div class="header">
           <h1 class="title">SELECT SONG</h1>
+          <a href="https://stepmaniaonline.net/" target="_blank" rel="noopener" class="download-packs-link">
+            Download Packs ↗
+          </a>
         </div>
 
         <div class="columns">
@@ -1055,6 +1058,22 @@ export class SongSelectScreen {
         -webkit-text-fill-color: transparent;
         background-clip: text;
         margin: 0;
+      }
+
+      .download-packs-link {
+        color: ${THEME.text.secondary};
+        text-decoration: none;
+        font-size: 0.875rem;
+        padding: 0.5rem 1rem;
+        border: 1px solid ${THEME.bg.tertiary};
+        border-radius: 6px;
+        transition: all 0.2s ease;
+      }
+
+      .download-packs-link:hover {
+        color: ${THEME.accent.primary};
+        border-color: ${THEME.accent.primary};
+        background: rgba(0, 212, 255, 0.1);
       }
 
       .difficulty-filter {

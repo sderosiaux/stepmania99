@@ -6,6 +6,8 @@ A browser-based rhythm game inspired by StepMania/DDR, playable directly in your
 
 ## Adding Songs
 
+**[Download song packs from StepMania Online](https://stepmaniaonline.net/)**
+
 Place StepMania song packs in `public/songs/`:
 
 ```
