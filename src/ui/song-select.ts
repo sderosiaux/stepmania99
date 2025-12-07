@@ -545,8 +545,8 @@ export class SongSelectScreen {
           <div class="column packs-column ${this.activeColumn === 'packs' ? 'active' : ''}">
             <div class="column-list">
               <div class="wheel-border"></div>
-              <div class="wheel-viewport" style="--item-height: 44px; --total-items: ${this.packs.length}; --selected-idx: ${this.selectedPackIndex}; --sep-height: 18px">
-                <div class="wheel-container" style="top: calc(50% - var(--item-height) / 2); transform: translateY(calc((var(--total-items) * var(--item-height) + var(--sep-height) + var(--selected-idx) * var(--item-height)) * -1))">
+              <div class="wheel-viewport" style="--item-height: 44px; --total-items: ${this.packs.length}; --selected-idx: ${this.selectedPackIndex}">
+                <div class="wheel-container" style="top: calc(50% - var(--item-height) / 2); transform: translateY(calc((var(--total-items) * var(--item-height) + var(--selected-idx) * var(--item-height)) * -1))">
                   ${this.packs.length === 0 ? '<div class="empty">No songs</div>' : (() => {
                     // Render 3 copies: before separator, main, after separator
                     const renderPack = (pack: SongPack, realIndex: number, virtualOffset: number) => {
@@ -566,7 +566,6 @@ export class SongSelectScreen {
                         </div>
                       `;
                     };
-                    const separator = `<div class="wheel-separator"></div>`;
                     const n = this.packs.length;
                     // Previous cycle (negative offsets)
                     const prevCycle = this.packs.map((pack, i) => renderPack(pack, i, i - n)).join('');
@@ -574,7 +573,7 @@ export class SongSelectScreen {
                     const mainCycle = this.packs.map((pack, i) => renderPack(pack, i, i)).join('');
                     // Next cycle (positive offsets beyond n)
                     const nextCycle = this.packs.map((pack, i) => renderPack(pack, i, i + n)).join('');
-                    return prevCycle + separator + mainCycle + separator + nextCycle;
+                    return prevCycle + mainCycle + nextCycle;
                   })()}
                 </div>
               </div>
@@ -585,8 +584,8 @@ export class SongSelectScreen {
           <div class="column songs-column ${this.activeColumn === 'songs' ? 'active' : ''}">
             <div class="column-list">
               <div class="wheel-border"></div>
-              <div class="wheel-viewport" style="--item-height: 56px; --total-items: ${currentPack?.songs.length || 0}; --selected-idx: ${this.selectedSongIndex}; --sep-height: 18px">
-                <div class="wheel-container" style="top: calc(50% - var(--item-height) / 2); transform: translateY(calc((var(--total-items) * var(--item-height) + var(--sep-height) + var(--selected-idx) * var(--item-height)) * -1))">
+              <div class="wheel-viewport" style="--item-height: 56px; --total-items: ${currentPack?.songs.length || 0}; --selected-idx: ${this.selectedSongIndex}">
+                <div class="wheel-container" style="top: calc(50% - var(--item-height) / 2); transform: translateY(calc((var(--total-items) * var(--item-height) + var(--selected-idx) * var(--item-height)) * -1))">
                   ${!currentPack ? '<div class="empty">Select a pack</div>' : (() => {
                     const songs = currentPack.songs;
                     const renderSong = (song: Song, realIndex: number, virtualOffset: number) => {
@@ -615,12 +614,11 @@ export class SongSelectScreen {
                         </div>
                       `;
                     };
-                    const separator = `<div class="wheel-separator"></div>`;
                     const n = songs.length;
                     const prevCycle = songs.map((song, i) => renderSong(song, i, i - n)).join('');
                     const mainCycle = songs.map((song, i) => renderSong(song, i, i)).join('');
                     const nextCycle = songs.map((song, i) => renderSong(song, i, i + n)).join('');
-                    return prevCycle + separator + mainCycle + separator + nextCycle;
+                    return prevCycle + mainCycle + nextCycle;
                   })()}
                 </div>
               </div>
@@ -1268,22 +1266,6 @@ export class SongSelectScreen {
         opacity: 1 !important;
       }
 
-      /* Golden separator between wheel cycles */
-      .wheel-separator {
-        height: 2px;
-        margin: 8px 0;
-        background: linear-gradient(
-          90deg,
-          transparent 0%,
-          #d4af37 20%,
-          #ffd700 50%,
-          #d4af37 80%,
-          transparent 100%
-        );
-        box-shadow: 0 0 8px rgba(255, 215, 0, 0.5);
-        border-radius: 1px;
-      }
-
       /* Wheel edge fade overlay */
       .wheel-viewport::before,
       .wheel-viewport::after {
@@ -1344,17 +1326,34 @@ export class SongSelectScreen {
 
       .list-item:hover { background: ${THEME.bg.tertiary}; }
       .list-item.selected {
-        background: linear-gradient(135deg, rgba(0, 180, 255, 0.4), rgba(180, 0, 255, 0.3));
-        animation: selected-glow var(--glow-speed, 2s) ease-in-out infinite;
+        background: transparent;
+        position: relative;
       }
 
-      @keyframes selected-glow {
-        0%, 100% {
-          box-shadow: inset 0 0 15px rgba(0, 200, 255, 0.3), 0 0 8px rgba(0, 180, 255, 0.4);
-        }
-        50% {
-          box-shadow: inset 0 0 25px rgba(0, 220, 255, 0.5), 0 0 15px rgba(0, 200, 255, 0.6), 0 0 25px rgba(180, 0, 255, 0.3);
-        }
+      .list-item.selected::before,
+      .list-item.selected::after {
+        content: '';
+        position: absolute;
+        left: 0;
+        right: 0;
+        height: 2px;
+        background: linear-gradient(
+          90deg,
+          transparent 0%,
+          #d4af37 20%,
+          #ffd700 50%,
+          #d4af37 80%,
+          transparent 100%
+        );
+        box-shadow: 0 0 8px rgba(255, 215, 0, 0.5);
+      }
+
+      .list-item.selected::before {
+        top: -2px;
+      }
+
+      .list-item.selected::after {
+        bottom: -2px;
       }
 
       .list-item.selected .item-name,
