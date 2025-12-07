@@ -194,8 +194,21 @@ export class Renderer {
       this.columnX[dir] = startX + i * (LAYOUT.arrowSize + LAYOUT.arrowGap) + LAYOUT.arrowSize / 2;
     });
 
-    // Calculate receptor Y position
-    this.receptorY = this.height * LAYOUT.receptorY;
+    // Calculate receptor Y position based on skin
+    this.updateReceptorPosition();
+  }
+
+  /**
+   * Update receptor position based on note skin
+   */
+  private updateReceptorPosition(): void {
+    if (this.noteSkin === 'gems') {
+      // Guitar Hero style: receptors at bottom
+      this.receptorY = this.height * 0.88;
+    } else {
+      // DDR style: receptors near top
+      this.receptorY = this.height * LAYOUT.receptorY;
+    }
   }
 
   /**
@@ -490,6 +503,7 @@ export class Renderer {
    */
   setNoteSkin(skin: NoteSkin): void {
     this.noteSkin = skin;
+    this.updateReceptorPosition();
   }
 
   /**
@@ -1026,6 +1040,8 @@ export class Renderer {
    * @param bpm - BPM for BPM-based scrolling (when cmod is 0)
    */
   drawNotes(notes: Note[], currentTime: number, cmod: number = 500, bpm: number = 120): void {
+    const isGems = this.noteSkin === 'gems';
+
     // Calculate pixels per millisecond
     // CMod 500 = 500 pixels/second = 0.5 pixels/ms
     // When cmod is 0, derive speed from BPM (4 beats visible on screen)
@@ -1034,13 +1050,18 @@ export class Renderer {
       // BPM-based: aim for ~4 beats visible on screen
       const msPerBeat = 60000 / bpm;
       const beatsVisible = 4;
-      pixelsPerMs = (this.height - this.receptorY) / (msPerBeat * beatsVisible);
+      const scrollDistance = isGems ? this.receptorY : (this.height - this.receptorY);
+      pixelsPerMs = scrollDistance / (msPerBeat * beatsVisible);
     } else {
       pixelsPerMs = cmod / 1000;
     }
 
     // Calculate look-ahead time based on screen height
     const lookAheadMs = this.height / pixelsPerMs;
+
+    // Guitar Hero perspective settings
+    const vanishingPointY = isGems ? this.height * 0.35 : 0; // Where notes appear from
+    const perspectiveRange = isGems ? (this.receptorY - vanishingPointY) : 0;
 
     // Draw hold notes first (so tap notes render on top)
     for (const note of notes) {
@@ -1069,22 +1090,75 @@ export class Renderer {
       if (timeDiff < -500) continue; // Allow some time for miss animation
 
       // Calculate Y position
-      // Positive timeDiff = note is below receptor (approaching from bottom)
-      const y = this.receptorY + timeDiff * pixelsPerMs;
+      let y: number;
+      let scale = 1;
+      let noteX = this.columnX[note.direction];
+
+      if (isGems) {
+        // Guitar Hero style: notes come from above (vanishing point) towards receptor at bottom
+        // Negative pixelsPerMs to reverse direction
+        y = this.receptorY - timeDiff * pixelsPerMs;
+
+        // Perspective scaling: notes get smaller as they're further from receptor
+        if (y < this.receptorY && perspectiveRange > 0) {
+          const distanceFromReceptor = this.receptorY - y;
+          const normalizedDistance = Math.min(1, distanceFromReceptor / perspectiveRange);
+          scale = 1 - normalizedDistance * 0.6; // Scale from 1.0 (at receptor) to 0.4 (at vanishing point)
+
+          // Lane convergence: move notes towards center as they get further
+          const centerX = this.width / 2;
+          noteX = centerX + (noteX - centerX) * (1 - normalizedDistance * 0.5);
+        }
+      } else {
+        // DDR style: notes approach from below
+        y = this.receptorY + timeDiff * pixelsPerMs;
+      }
 
       // Skip if off screen
       if (y < -LAYOUT.arrowSize || y > this.height + LAYOUT.arrowSize) continue;
 
-      const x = this.columnX[note.direction];
-
       // Fade out notes that are past the receptor
-      const alpha = timeDiff < 0 ? Math.max(0, 1 + timeDiff / 200) : 1;
+      let alpha: number;
+      if (isGems) {
+        alpha = timeDiff < 0 ? Math.max(0, 1 + timeDiff / 200) : 1;
+        // Also fade in notes at vanishing point
+        if (y < vanishingPointY + 50) {
+          alpha *= Math.max(0, (y - vanishingPointY) / 50);
+        }
+      } else {
+        alpha = timeDiff < 0 ? Math.max(0, 1 + timeDiff / 200) : 1;
+      }
 
       // Get beat subdivision color
       const beatColor = this.getBeatColor(note.beat);
 
-      this.drawArrow(x, y, note.direction, alpha, false, beatColor);
+      this.drawArrowWithScale(noteX, y, note.direction, alpha, false, beatColor, scale);
     }
+  }
+
+  /**
+   * Draw arrow/gem with custom scale (for perspective)
+   */
+  private drawArrowWithScale(
+    x: number,
+    y: number,
+    direction: Direction,
+    alpha: number = 1,
+    isReceptor: boolean = false,
+    colorOverride?: string,
+    scale: number = 1
+  ): void {
+    if (scale === 1) {
+      this.drawArrow(x, y, direction, alpha, isReceptor, colorOverride);
+      return;
+    }
+
+    this.ctx.save();
+    this.ctx.translate(x, y);
+    this.ctx.scale(scale, scale);
+    this.ctx.translate(-x, -y);
+    this.drawArrow(x, y, direction, alpha, isReceptor, colorOverride);
+    this.ctx.restore();
   }
 
   /**
