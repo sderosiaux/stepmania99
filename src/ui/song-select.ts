@@ -193,6 +193,7 @@ export interface SongSelectCallbacks {
   onSongSelect: (song: Song, chart: Chart, settings: Partial<Settings>) => void;
   onDemo?: (song: Song, chart: Chart, settings: Partial<Settings>) => void;
   onBack?: () => void;
+  onMultiplayer?: () => void;
 }
 
 const DIFFICULTY_FILTERS = ['All', 'Easy+', 'Medium+', 'Hard+', 'Challenge'] as const;
@@ -538,9 +539,14 @@ export class SongSelectScreen {
       <div class="song-select-4col">
         <div class="header">
           <h1 class="title">SELECT SONG</h1>
-          <a href="https://stepmaniaonline.net/" target="_blank" rel="noopener" class="download-packs-link">
-            Download Packs ↗
-          </a>
+          <div class="header-actions">
+            <button id="multiplayer-btn" class="multiplayer-btn" ${this.callbacks.onMultiplayer ? '' : 'disabled'}>
+              <span class="mp-icon">⚔</span> Multiplayer
+            </button>
+            <a href="https://stepmaniaonline.net/" target="_blank" rel="noopener" class="download-packs-link">
+              Download Packs ↗
+            </a>
+          </div>
         </div>
 
         <div class="columns">
@@ -1026,6 +1032,14 @@ export class SongSelectScreen {
         this.render();
       });
     });
+
+    // Multiplayer button click
+    const mpBtn = this.container.querySelector('#multiplayer-btn');
+    if (mpBtn && this.callbacks.onMultiplayer) {
+      mpBtn.addEventListener('click', () => {
+        this.callbacks.onMultiplayer?.();
+      });
+    }
   }
 
   private getStyles(): string {
@@ -1074,6 +1088,42 @@ export class SongSelectScreen {
         color: ${THEME.accent.primary};
         border-color: ${THEME.accent.primary};
         background: rgba(0, 212, 255, 0.1);
+      }
+
+      .header-actions {
+        display: flex;
+        gap: 0.75rem;
+        align-items: center;
+      }
+
+      .multiplayer-btn {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.5rem 1rem;
+        background: linear-gradient(135deg, ${THEME.accent.secondary}, #ff4488);
+        border: none;
+        border-radius: 6px;
+        color: white;
+        font-size: 0.875rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s ease;
+      }
+
+      .multiplayer-btn:hover:not(:disabled) {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 15px rgba(255, 0, 170, 0.4);
+      }
+
+      .multiplayer-btn:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+        background: ${THEME.bg.tertiary};
+      }
+
+      .mp-icon {
+        font-size: 1rem;
       }
 
       .difficulty-filter {

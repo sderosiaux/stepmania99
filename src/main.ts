@@ -1,10 +1,13 @@
-import type { Song, Chart, GameScreen, ResultsData, Settings } from './types';
+import type { Song, Chart, GameScreen, ResultsData, Settings, Difficulty } from './types';
 import { DEFAULT_SETTINGS } from './types';
 import { audioManager } from './audio';
 import { GameController } from './core/game';
 import { loadAllSongs } from './core/loader';
 import { SongSelectScreen, saveScore } from './ui/song-select';
 import { ResultsScreen } from './ui/results';
+import { LobbyScreen } from './ui/lobby';
+import { multiplayerClient, multiplayerGameManager } from './multiplayer';
+import type { MultiplayerEvent } from './multiplayer';
 
 // ============================================================================
 // Main Application
@@ -18,12 +21,16 @@ class App {
   private gameController: GameController | null = null;
   private songSelectScreen: SongSelectScreen | null = null;
   private resultsScreen: ResultsScreen | null = null;
+  private lobbyScreen: LobbyScreen | null = null;
 
-  private currentScreen: GameScreen = 'loading';
+  private currentScreen: GameScreen | 'lobby' = 'loading';
   private songs: Song[] = [];
   private lastPlayedSong: Song | null = null;
   private lastPlayedChart: Chart | null = null;
   private currentSettings: Settings = { ...DEFAULT_SETTINGS };
+
+  /** Multiplayer mode active */
+  private isMultiplayerMode: boolean = false;
 
   constructor() {
     this.canvas = document.getElementById('game-canvas') as HTMLCanvasElement;
@@ -38,6 +45,7 @@ class App {
     this.songSelectScreen = new SongSelectScreen(this.uiContainer, {
       onSongSelect: (song, chart, settings) => this.startGame(song, chart, settings),
       onDemo: (song, chart, settings) => this.startGame(song, chart, settings, true),
+      onMultiplayer: () => this.showLobby(),
     });
 
     this.resultsScreen = new ResultsScreen(this.uiContainer, {
@@ -45,9 +53,17 @@ class App {
       onRetry: () => this.retryLastSong(),
     });
 
+    this.lobbyScreen = new LobbyScreen(this.uiContainer, {
+      onStartGame: (songId, difficulty) => this.startMultiplayerGame(songId, difficulty),
+      onCancel: () => this.showSongSelect(),
+    });
+
     // Global keyboard handlers for pause/exit
     window.addEventListener('keydown', this.handleGlobalKeyDown.bind(this));
     window.addEventListener('keyup', this.handleGlobalKeyUp.bind(this));
+
+    // Listen for multiplayer events
+    multiplayerClient.addEventListener(this.handleMultiplayerEvent.bind(this));
   }
 
   /**
@@ -97,10 +113,57 @@ class App {
    */
   private showSongSelect(): void {
     this.currentScreen = 'song-select';
+    this.isMultiplayerMode = false;
     this.canvas.classList.add('hidden');
     this.uiContainer.classList.remove('hidden');
     this.resultsScreen?.hide();
+    this.lobbyScreen?.hide();
     this.songSelectScreen?.show(this.songs);
+  }
+
+  /**
+   * Show multiplayer lobby
+   */
+  private showLobby(): void {
+    this.currentScreen = 'lobby';
+    this.songSelectScreen?.hide();
+    this.lobbyScreen?.show(this.songs);
+  }
+
+  /**
+   * Handle multiplayer events
+   */
+  private handleMultiplayerEvent(event: MultiplayerEvent): void {
+    if (event.type === 'game-ended' && this.isMultiplayerMode) {
+      // Game ended - show results
+      const results = this.gameController?.getResults();
+      if (results) {
+        this.showResults(results);
+      }
+    }
+  }
+
+  /**
+   * Start a multiplayer game
+   */
+  private async startMultiplayerGame(songId: string, difficulty: Difficulty): Promise<void> {
+    const song = this.songs.find(s => s.id === songId);
+    if (!song) {
+      console.error('Song not found:', songId);
+      return;
+    }
+
+    const chart = song.charts.find(c => c.difficulty === difficulty);
+    if (!chart) {
+      console.error('Chart not found:', difficulty);
+      return;
+    }
+
+    this.isMultiplayerMode = true;
+    multiplayerGameManager.init();
+
+    // Start the game
+    await this.startGame(song, chart, {});
   }
 
   /**
@@ -123,6 +186,7 @@ class App {
 
     // Hide UI, show canvas
     this.songSelectScreen?.hide();
+    this.lobbyScreen?.hide();
     this.uiContainer.classList.add('hidden');
     this.canvas.classList.remove('hidden');
 

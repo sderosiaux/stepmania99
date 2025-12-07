@@ -1,4 +1,4 @@
-# Test Plan - StepMania Web
+# Test Plan - Stepmania99
 
 ## Testing Philosophy
 

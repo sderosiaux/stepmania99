@@ -131,7 +131,7 @@ L...  // Inline comments NOT supported
 
 ```
 #TITLE:Tutorial Song
-#ARTIST:StepMania Web
+#ARTIST:Stepmania99
 #BPM:120
 #OFFSET:0.0
 #MUSIC:tutorial.mp3

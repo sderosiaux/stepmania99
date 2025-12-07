@@ -1875,4 +1875,201 @@ export class Renderer {
   getDimensions(): { width: number; height: number } {
     return { width: this.width, height: this.height };
   }
+
+  /**
+   * Draw multiplayer opponents panel on the right side
+   */
+  drawOpponents(opponents: Array<{ id: string; name: string; health: number; combo: number; isAlive: boolean }>): void {
+    if (opponents.length === 0) return;
+
+    // Position to the right of the lanes
+    const totalLaneWidth = LAYOUT.arrowSize * 4 + LAYOUT.arrowGap * 3;
+    const lanesEndX = (this.width + totalLaneWidth) / 2;
+    const panelX = lanesEndX + 30;
+    const panelY = 100;
+    const cardWidth = 140;
+    const cardHeight = 50;
+    const cardGap = 8;
+
+    this.ctx.save();
+
+    // Panel title
+    this.ctx.font = 'bold 14px -apple-system, sans-serif';
+    this.ctx.fillStyle = THEME.text.secondary;
+    this.ctx.textAlign = 'left';
+    this.ctx.textBaseline = 'top';
+    this.ctx.fillText('OPPONENTS', panelX, panelY - 25);
+
+    // Draw each opponent card
+    opponents.forEach((opponent, index) => {
+      const y = panelY + index * (cardHeight + cardGap);
+
+      // Card background
+      this.ctx.fillStyle = opponent.isAlive
+        ? 'rgba(20, 20, 30, 0.8)'
+        : 'rgba(40, 10, 10, 0.6)';
+      this.roundRect(panelX, y, cardWidth, cardHeight, 8);
+      this.ctx.fill();
+
+      // Border
+      this.ctx.strokeStyle = opponent.isAlive
+        ? 'rgba(100, 100, 120, 0.5)'
+        : 'rgba(100, 50, 50, 0.5)';
+      this.ctx.lineWidth = 1;
+      this.roundRect(panelX, y, cardWidth, cardHeight, 8);
+      this.ctx.stroke();
+
+      // Name
+      this.ctx.font = 'bold 12px -apple-system, sans-serif';
+      this.ctx.fillStyle = opponent.isAlive ? THEME.text.primary : THEME.text.muted;
+      this.ctx.textAlign = 'left';
+      const displayName = opponent.name.length > 12 ? opponent.name.slice(0, 11) + '...' : opponent.name;
+      this.ctx.fillText(displayName, panelX + 10, y + 12);
+
+      if (opponent.isAlive) {
+        // Mini health bar
+        const healthBarX = panelX + 10;
+        const healthBarY = y + 28;
+        const healthBarWidth = cardWidth - 20;
+        const healthBarHeight = 8;
+
+        // Background
+        this.ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+        this.roundRect(healthBarX, healthBarY, healthBarWidth, healthBarHeight, 4);
+        this.ctx.fill();
+
+        // Health fill
+        const healthPercent = Math.max(0, Math.min(100, opponent.health)) / 100;
+        const healthColor = opponent.health > 60 ? '#cc2222' : opponent.health > 30 ? '#cc6600' : '#aa1111';
+        this.ctx.fillStyle = healthColor;
+        if (healthPercent > 0) {
+          this.roundRect(healthBarX, healthBarY, healthBarWidth * healthPercent, healthBarHeight, 4);
+          this.ctx.fill();
+        }
+
+        // Combo (on the right)
+        if (opponent.combo > 0) {
+          this.ctx.font = 'bold 11px -apple-system, sans-serif';
+          this.ctx.fillStyle = opponent.combo >= 50 ? THEME.accent.warning : THEME.text.secondary;
+          this.ctx.textAlign = 'right';
+          this.ctx.fillText(`${opponent.combo}x`, panelX + cardWidth - 10, y + 12);
+        }
+      } else {
+        // Eliminated text
+        this.ctx.font = 'bold 10px -apple-system, sans-serif';
+        this.ctx.fillStyle = THEME.accent.error;
+        this.ctx.textAlign = 'left';
+        this.ctx.fillText('ELIMINATED', panelX + 10, y + 32);
+      }
+    });
+
+    this.ctx.restore();
+  }
+
+  /**
+   * Draw attack arrow with special styling
+   */
+  drawAttackArrow(
+    direction: Direction,
+    y: number,
+    currentTime: number,
+    fromPlayerName: string
+  ): void {
+    const x = this.columnX[direction];
+    const size = LAYOUT.arrowSize;
+
+    this.ctx.save();
+
+    // Pulsing red glow
+    const pulse = 0.5 + 0.5 * Math.sin(currentTime / 100);
+    this.ctx.shadowColor = '#ff0044';
+    this.ctx.shadowBlur = 15 + pulse * 10;
+
+    // Draw arrow shape
+    this.ctx.translate(x, y);
+
+    // Rotation based on direction
+    const rotations: Record<Direction, number> = {
+      left: Math.PI,
+      down: Math.PI / 2,
+      up: -Math.PI / 2,
+      right: 0,
+    };
+    this.ctx.rotate(rotations[direction]);
+
+    // Arrow body
+    const arrowPath = new Path2D();
+    const halfSize = size * 0.4;
+
+    // Create arrow shape pointing right
+    arrowPath.moveTo(halfSize, 0);
+    arrowPath.lineTo(0, -halfSize);
+    arrowPath.lineTo(0, -halfSize * 0.4);
+    arrowPath.lineTo(-halfSize * 0.8, -halfSize * 0.4);
+    arrowPath.lineTo(-halfSize * 0.8, halfSize * 0.4);
+    arrowPath.lineTo(0, halfSize * 0.4);
+    arrowPath.lineTo(0, halfSize);
+    arrowPath.closePath();
+
+    // Fill with red gradient
+    const gradient = this.ctx.createLinearGradient(-halfSize, 0, halfSize, 0);
+    gradient.addColorStop(0, '#ff2244');
+    gradient.addColorStop(0.5, '#ff4466');
+    gradient.addColorStop(1, '#ff2244');
+
+    this.ctx.fillStyle = gradient;
+    this.ctx.fill(arrowPath);
+
+    // Border
+    this.ctx.strokeStyle = '#ffffff';
+    this.ctx.lineWidth = 2;
+    this.ctx.stroke(arrowPath);
+
+    this.ctx.restore();
+
+    // Draw attacker name above arrow
+    this.ctx.save();
+    this.ctx.font = 'bold 10px -apple-system, sans-serif';
+    this.ctx.fillStyle = '#ff4466';
+    this.ctx.textAlign = 'center';
+    this.ctx.textBaseline = 'bottom';
+    this.ctx.fillText(fromPlayerName, x, y - size / 2 - 5);
+    this.ctx.restore();
+  }
+
+  /**
+   * Draw multiplayer HUD (alive count, etc.)
+   */
+  drawMultiplayerHUD(aliveCount: number, totalPlayers: number): void {
+    this.ctx.save();
+
+    // Position at top center
+    const x = this.width / 2;
+    const y = 20;
+
+    // Background pill
+    const text = `${aliveCount}/${totalPlayers} ALIVE`;
+    this.ctx.font = 'bold 14px -apple-system, sans-serif';
+    const textWidth = this.ctx.measureText(text).width;
+    const pillWidth = textWidth + 24;
+    const pillHeight = 28;
+
+    this.ctx.fillStyle = 'rgba(20, 20, 30, 0.9)';
+    this.roundRect(x - pillWidth / 2, y, pillWidth, pillHeight, pillHeight / 2);
+    this.ctx.fill();
+
+    // Border
+    this.ctx.strokeStyle = THEME.accent.primary;
+    this.ctx.lineWidth = 1;
+    this.roundRect(x - pillWidth / 2, y, pillWidth, pillHeight, pillHeight / 2);
+    this.ctx.stroke();
+
+    // Text
+    this.ctx.fillStyle = THEME.text.primary;
+    this.ctx.textAlign = 'center';
+    this.ctx.textBaseline = 'middle';
+    this.ctx.fillText(text, x, y + pillHeight / 2);
+
+    this.ctx.restore();
+  }
 }

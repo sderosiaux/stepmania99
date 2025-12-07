@@ -1,4 +1,4 @@
-# StepMania Web - Product Specification
+# Stepmania99 - Product Specification
 
 ## Overview
 
