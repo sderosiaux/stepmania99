@@ -631,33 +631,49 @@ export class SongSelectScreen {
           <div class="column difficulties-column ${this.activeColumn === 'difficulties' ? 'active' : ''}">
             <div class="column-list">
               <div class="wheel-border"></div>
-              <div class="wheel-viewport" style="--item-height: 52px; --selected-idx: ${this.selectedDifficultyIndex}">
-                <div class="wheel-container" style="top: calc(50% - var(--item-height) / 2); transform: translateY(calc(var(--selected-idx) * var(--item-height) * -1))">
-                  ${!currentSong ? '<div class="empty">Select a song</div>' : currentSong.charts.map((chart, i) => {
-                    const offset = i - this.selectedDifficultyIndex;
-                    const absOffset = Math.abs(offset);
-                    const rotateX = offset * -3;
-                    const translateZ = -absOffset * 5;
-                    const opacity = Math.max(0.35, 1 - absOffset * 0.1);
-                    const scale = Math.max(0.9, 1 - absOffset * 0.02);
-                    const chartScore = getScore(currentSong.id, chart.difficulty);
-                    return `
-                      <div class="list-item wheel-item diff-item ${i === this.selectedDifficultyIndex ? 'selected' : ''}"
-                           data-diff-idx="${i}"
-                           style="transform: rotateX(${rotateX}deg) translateZ(${translateZ}px) scale(${scale}); opacity: ${opacity};">
-                        <div class="diff-row">
-                          <span class="diff-name" data-diff="${chart.difficulty}">${chart.difficulty}</span>
-                          <span class="diff-level">Lv.${chart.level}</span>
-                        </div>
-                        ${chartScore ? `
-                          <div class="diff-score">
-                            <span class="diff-grade grade-${chartScore.grade.toLowerCase()}">${chartScore.grade}</span>
-                            <span class="diff-score-value">${chartScore.score.toLocaleString()}</span>
+              <div class="wheel-viewport" style="--item-height: 52px; --selected-idx: ${this.selectedDifficultyIndex}; --ghost-count: 8">
+                <div class="wheel-container" style="top: calc(50% - var(--item-height) / 2); transform: translateY(calc((var(--ghost-count) + var(--selected-idx)) * var(--item-height) * -1))">
+                  ${!currentSong ? '<div class="empty">Select a song</div>' : (() => {
+                    const ghostsBefore = Array(8).fill(0).map((_, i) => {
+                      const offset = -(8 - i) - this.selectedDifficultyIndex;
+                      const rotateX = offset * -3;
+                      return `<div class="wheel-ghost wheel-item" style="transform: rotateX(${rotateX}deg);"></div>`;
+                    }).join('');
+
+                    const items = currentSong.charts.map((chart, i) => {
+                      const offset = i - this.selectedDifficultyIndex;
+                      const absOffset = Math.abs(offset);
+                      const rotateX = offset * -3;
+                      const translateZ = -absOffset * 5;
+                      const opacity = Math.max(0.35, 1 - absOffset * 0.1);
+                      const scale = Math.max(0.9, 1 - absOffset * 0.02);
+                      const chartScore = getScore(currentSong.id, chart.difficulty);
+                      return `
+                        <div class="list-item wheel-item diff-item ${i === this.selectedDifficultyIndex ? 'selected' : ''}"
+                             data-diff-idx="${i}"
+                             style="transform: rotateX(${rotateX}deg) translateZ(${translateZ}px) scale(${scale}); opacity: ${opacity};">
+                          <div class="diff-row">
+                            <span class="diff-name" data-diff="${chart.difficulty}">${chart.difficulty}</span>
+                            <span class="diff-level">Lv.${chart.level}</span>
                           </div>
-                        ` : '<div class="diff-no-score">No play</div>'}
-                      </div>
-                    `;
-                  }).join('')}
+                          ${chartScore ? `
+                            <div class="diff-score">
+                              <span class="diff-grade grade-${chartScore.grade.toLowerCase()}">${chartScore.grade}</span>
+                              <span class="diff-score-value">${chartScore.score.toLocaleString()}</span>
+                            </div>
+                          ` : '<div class="diff-no-score">No play</div>'}
+                        </div>
+                      `;
+                    }).join('');
+
+                    const ghostsAfter = Array(8).fill(0).map((_, i) => {
+                      const offset = currentSong.charts.length + i - this.selectedDifficultyIndex;
+                      const rotateX = offset * -3;
+                      return `<div class="wheel-ghost wheel-item" style="transform: rotateX(${rotateX}deg);"></div>`;
+                    }).join('');
+
+                    return ghostsBefore + items + ghostsAfter;
+                  })()}
                 </div>
               </div>
             </div>
@@ -915,6 +931,10 @@ export class SongSelectScreen {
           <div class="title-row">
             <h2 class="song-title">${escapeHtml(song.title)}</h2>
             <span class="song-duration">${formatDuration(stats.durationSec)}</span>
+            <button class="play-button">
+              <span class="play-icon">▶</span>
+              <span class="play-text">ENTER TO PLAY</span>
+            </button>
           </div>
           <div class="song-artist">${escapeHtml(song.artist)}</div>
           <div class="chart-info-row">
@@ -1271,7 +1291,7 @@ export class SongSelectScreen {
         position: absolute;
         left: 0;
         right: 0;
-        height: 15%;
+        height: 20%;
         pointer-events: none;
         z-index: 10;
       }
@@ -1280,7 +1300,7 @@ export class SongSelectScreen {
         top: 0;
         background: linear-gradient(
           to bottom,
-          ${THEME.bg.secondary} 0%,
+          ${THEME.bg.primary} 0%,
           transparent 100%
         );
       }
@@ -1289,7 +1309,7 @@ export class SongSelectScreen {
         bottom: 0;
         background: linear-gradient(
           to top,
-          ${THEME.bg.secondary} 0%,
+          ${THEME.bg.primary} 0%,
           transparent 100%
         );
       }
@@ -1307,6 +1327,19 @@ export class SongSelectScreen {
         cursor: pointer;
         transition: all 0.1s ease;
         margin-bottom: 0.25rem;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+      }
+
+      /* Ghost items to simulate wheel continuity */
+      .wheel-ghost {
+        height: 52px;
+        min-height: 52px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+        padding: 0.6rem 0.75rem;
+        margin-bottom: 0.25rem;
+        flex-shrink: 0;
+        box-sizing: border-box;
+        border-radius: 6px;
       }
 
       .list-item:hover { background: ${THEME.bg.tertiary}; }
@@ -1439,6 +1472,49 @@ export class SongSelectScreen {
       .diff-grade { font-weight: 700; font-size: 0.7rem; padding: 0.1rem 0.3rem; border-radius: 3px; }
       .diff-score-value { color: ${THEME.text.secondary}; font-family: 'SF Mono', Monaco, monospace; font-size: 0.7rem; }
       .diff-no-score { font-size: 0.7rem; color: ${THEME.text.muted}; font-style: italic; }
+
+      /* Play button */
+      .play-button {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.75rem 1.5rem;
+        margin-left: auto;
+        background: linear-gradient(135deg, #d4af37, #ffd700, #d4af37);
+        background-size: 200% 200%;
+        border: none;
+        border-radius: 8px;
+        color: #1a1a2e;
+        font-size: 1rem;
+        font-weight: 700;
+        letter-spacing: 1px;
+        cursor: pointer;
+        animation: play-button-glow var(--glow-speed, 2s) ease-in-out infinite, play-button-shimmer 3s ease-in-out infinite;
+        transition: transform 0.15s ease;
+      }
+
+      .play-button:hover {
+        transform: scale(1.05);
+      }
+
+      .play-icon {
+        font-size: 1.2rem;
+      }
+
+      @keyframes play-button-glow {
+        0%, 100% {
+          box-shadow: 0 0 10px rgba(255, 215, 0, 0.5), 0 0 20px rgba(255, 215, 0, 0.3), 0 0 30px rgba(255, 215, 0, 0.2);
+        }
+        50% {
+          box-shadow: 0 0 15px rgba(255, 215, 0, 0.8), 0 0 30px rgba(255, 215, 0, 0.5), 0 0 45px rgba(255, 215, 0, 0.3);
+        }
+      }
+
+      @keyframes play-button-shimmer {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+      }
 
       /* Chart details in stats column */
       .chart-details { padding: 1rem; }
