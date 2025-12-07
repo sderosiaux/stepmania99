@@ -4,9 +4,10 @@
   "description": "Browser-based StepMania rhythm game with precision timing",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
+    "dev": "npm run scan-songs && vite",
+    "build": "npm run scan-songs && tsc && vite build",
     "preview": "vite preview",
+    "scan-songs": "node scripts/generate-songs-manifest.js",
     "test": "vitest",
     "test:ui": "vitest --ui",
     "test:coverage": "vitest --coverage"

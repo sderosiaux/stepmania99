@@ -1,0 +1,132 @@
+{
+  "version": 1,
+  "generated": "2025-12-07T08:40:21.685Z",
+  "songs": [
+    {
+      "pack": "Xclusive MegaPack",
+      "folder": "(Hiro) The Tussin",
+      "smFile": "The Tussin.sm",
+      "path": "Xclusive MegaPack/(Hiro) The Tussin"
+    },
+    {
+      "pack": "Xclusive MegaPack",
+      "folder": "(Hiro) Thong Mover",
+      "smFile": "Thong Mover.sm",
+      "path": "Xclusive MegaPack/(Hiro) Thong Mover"
+    },
+    {
+      "pack": "Xclusive MegaPack",
+      "folder": "(Reach) Ice Climb V2",
+      "smFile": "iceclimb.sm",
+      "path": "Xclusive MegaPack/(Reach) Ice Climb V2"
+    },
+    {
+      "pack": "Xclusive MegaPack",
+      "folder": "(hst) Flower Forever V2",
+      "smFile": "FLOWER FOREVER.sm",
+      "path": "Xclusive MegaPack/(hst) Flower Forever V2"
+    },
+    {
+      "pack": "Xclusive MegaPack",
+      "folder": "340BPM Gabber [Jello]",
+      "smFile": "340 bpm Gabber.sm",
+      "path": "Xclusive MegaPack/340BPM Gabber [Jello]"
+    },
+    {
+      "pack": "Xclusive MegaPack",
+      "folder": "Black_Dragon [DukAmok]",
+      "smFile": "Black_Dragon.sm",
+      "path": "Xclusive MegaPack/Black_Dragon [DukAmok]"
+    },
+    {
+      "pack": "Xclusive MegaPack",
+      "folder": "Daikenkai [Hayden]",
+      "smFile": "daikenkai.sm",
+      "path": "Xclusive MegaPack/Daikenkai [Hayden]"
+    },
+    {
+      "pack": "Xclusive MegaPack",
+      "folder": "Eruption [MelonMan]",
+      "smFile": "eruption.sm",
+      "path": "Xclusive MegaPack/Eruption [MelonMan]"
+    },
+    {
+      "pack": "Xclusive MegaPack",
+      "folder": "Frenzy [MelonMan]",
+      "smFile": "Frenzy.sm",
+      "path": "Xclusive MegaPack/Frenzy [MelonMan]"
+    },
+    {
+      "pack": "Xclusive MegaPack",
+      "folder": "Full Tilt [Eclipse]",
+      "smFile": "Full Tilt.sm",
+      "path": "Xclusive MegaPack/Full Tilt [Eclipse]"
+    },
+    {
+      "pack": "Xclusive MegaPack",
+      "folder": "Funky Sonic World+ (Kilga)",
+      "smFile": "Funky Sonic World+.sm",
+      "path": "Xclusive MegaPack/Funky Sonic World+ (Kilga)"
+    },
+    {
+      "pack": "Xclusive MegaPack",
+      "folder": "Gekkochou [Eggman]",
+      "smFile": "Gekkochou.sm",
+      "path": "Xclusive MegaPack/Gekkochou [Eggman]"
+    },
+    {
+      "pack": "Xclusive MegaPack",
+      "folder": "Lawn Wake IX [pfx]",
+      "smFile": "Lawn Wake IX.sm",
+      "path": "Xclusive MegaPack/Lawn Wake IX [pfx]"
+    },
+    {
+      "pack": "Xclusive MegaPack",
+      "folder": "Mindblowin' [pfx]",
+      "smFile": "Mindblowin'.sm",
+      "path": "Xclusive MegaPack/Mindblowin' [pfx]"
+    },
+    {
+      "pack": "Xclusive MegaPack",
+      "folder": "Moon_child [Reach]",
+      "smFile": "Moon Child (1).sm",
+      "path": "Xclusive MegaPack/Moon_child [Reach]"
+    },
+    {
+      "pack": "Xclusive MegaPack",
+      "folder": "Nottingham lace [Melonman]",
+      "smFile": "nottingham.sm",
+      "path": "Xclusive MegaPack/Nottingham lace [Melonman]"
+    },
+    {
+      "pack": "Xclusive MegaPack",
+      "folder": "Shind Bad [pfx]",
+      "smFile": "Shind Bad.sm",
+      "path": "Xclusive MegaPack/Shind Bad [pfx]"
+    },
+    {
+      "pack": "Xclusive MegaPack",
+      "folder": "Strangeprogam [DanTheMan]",
+      "smFile": "Strangeprogram.sm",
+      "path": "Xclusive MegaPack/Strangeprogam [DanTheMan]"
+    },
+    {
+      "pack": "Xclusive MegaPack",
+      "folder": "Uber Rave [-joe-]",
+      "smFile": "uberrave.sm",
+      "path": "Xclusive MegaPack/Uber Rave [-joe-]"
+    },
+    {
+      "pack": "Xclusive MegaPack",
+      "folder": "snowv2 [Cynic]",
+      "smFile": "snow.sm",
+      "path": "Xclusive MegaPack/snowv2 [Cynic]"
+    },
+    {
+      "pack": "_Mazu",
+      "folder": "Arcade",
+      "smFile": "arcade.sm",
+      "path": "_Mazu/Arcade"
+    }
+  ]
+}

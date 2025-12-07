@@ -35,8 +35,11 @@ export class GameController {
   /** Game timing - when we started (performance.now) */
   private gameStartTime: number = 0;
 
-  /** Audio start offset for sync */
-  private audioStartOffset: number = 0;
+  /** Offset to apply to performance.now() timing */
+  private perfTimeOffset: number = 0;
+
+  /** Offset to apply to audio time (just the song offset) */
+  private audioTimeOffset: number = 0;
 
   /** Preparation time before first note (ms) - lets arrows scroll up from bottom */
   private readonly PREP_TIME: number = 3000;
@@ -106,7 +109,10 @@ export class GameController {
     // Try to load audio (may fail for demo songs)
     this.hasAudio = false;
     try {
-      const audioPath = `songs/${song.id}/${song.musicFile}`;
+      // Use basePath if available (for .sm files), otherwise use song id
+      const audioPath = song.basePath
+        ? `${song.basePath}/${song.musicFile}`
+        : `songs/${song.id}/${song.musicFile}`;
       await audioManager.load(audioPath);
       this.hasAudio = true;
     } catch (error) {
@@ -150,6 +156,7 @@ export class GameController {
 
     // Reset timing stats and pause tracking for new game
     this.renderer.resetTimings();
+    this.renderer.setAudioOffset(this.settings.audioOffset);
     this.pauseTime = 0;
     this.totalPauseDuration = 0;
 
@@ -268,14 +275,21 @@ export class GameController {
       } else {
         // Initial start: set up timing
         this.gameStartTime = performance.now();
-        // Add prep time offset so game time starts negative, giving notes time to scroll up
-        this.audioStartOffset = this.state!.song.offset + this.settings.audioOffset - this.PREP_TIME;
+
+        // For performance.now() timing: starts at -PREP_TIME and increases
+        // Game time 0 = when beat 0 occurs = PREP_TIME after gameStartTime
+        this.perfTimeOffset = this.state!.song.offset + this.settings.audioOffset - this.PREP_TIME;
+
+        // For audio timing: audio time 0 = game time (song.offset)
+        // Because audio.play() is called at PREP_TIME, when game time should be 0
+        this.audioTimeOffset = this.state!.song.offset + this.settings.audioOffset;
 
         // Delay audio start by prep time (only if audio is available)
         if (this.hasAudio) {
           setTimeout(() => {
             if (this.running && !this.state?.paused) {
-              audioManager.play(Math.max(0, -this.state!.song.offset / 1000));
+              // Start audio at time 0 (offset is already baked into note times)
+              audioManager.play(0);
             }
           }, this.PREP_TIME);
         }
@@ -297,18 +311,19 @@ export class GameController {
   private getCurrentGameTime(): number {
     if (this.countdown.active) return -this.PREP_TIME - 1000;
 
-    // When paused, return the frozen pause time
+    // When paused, return the frozen pause time (use perf timing)
     if (this.state?.paused && this.pauseTime > 0) {
-      return this.pauseTime - this.gameStartTime - this.totalPauseDuration + this.audioStartOffset;
+      return this.pauseTime - this.gameStartTime - this.totalPauseDuration + this.perfTimeOffset;
     }
 
     // Use audio time as master clock when playing (if audio is available)
     if (this.hasAudio && audioManager.isPlaying) {
-      return audioManager.getCurrentTimeMs() + this.audioStartOffset;
+      // Audio time 0 = game time (song.offset), which is usually 0
+      return audioManager.getCurrentTimeMs() + this.audioTimeOffset;
     }
 
     // Fallback to performance timing (always used in silent mode)
-    return performance.now() - this.gameStartTime - this.totalPauseDuration + this.audioStartOffset;
+    return performance.now() - this.gameStartTime - this.totalPauseDuration + this.perfTimeOffset;
   }
 
   /**
@@ -318,12 +333,22 @@ export class GameController {
     if (!this.state || !this.scoreState) return;
 
     const inputs = inputManager.flush();
+    const now = performance.now();
 
     for (const input of inputs) {
       if (!input.pressed) continue; // Only process key presses
 
-      // Convert input timestamp to game time (must match getCurrentGameTime calculation)
-      const inputGameTime = input.timestamp - this.gameStartTime - this.totalPauseDuration + this.audioStartOffset;
+      // Calculate input game time
+      // When audio is playing, use audio time minus the delta since input happened
+      // This keeps input timing in sync with audio playback
+      let inputGameTime: number;
+      if (this.hasAudio && audioManager.isPlaying) {
+        const timeSinceInput = now - input.timestamp;
+        inputGameTime = currentTime - timeSinceInput;
+      } else {
+        // Fallback to performance timing
+        inputGameTime = input.timestamp - this.gameStartTime - this.totalPauseDuration + this.perfTimeOffset;
+      }
 
       // Find matching note (check both tap and hold note heads)
       const note = findMatchingNote(this.state.activeNotes, input.direction, inputGameTime);
@@ -828,6 +853,13 @@ export class GameController {
    */
   isPaused(): boolean {
     return this.state?.paused ?? false;
+  }
+
+  /**
+   * Check if game is in countdown (either start or resume countdown)
+   */
+  isInCountdown(): boolean {
+    return this.countdown.active;
   }
 
   /**

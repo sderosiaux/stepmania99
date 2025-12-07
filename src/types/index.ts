@@ -148,6 +148,22 @@ export interface Chart {
   notes: Note[];
 }
 
+/** BPM change event */
+export interface BpmChange {
+  /** Beat number where BPM changes */
+  beat: number;
+  /** New BPM value */
+  bpm: number;
+}
+
+/** Stop/freeze event (song pauses but notes continue) */
+export interface Stop {
+  /** Beat number where stop occurs */
+  beat: number;
+  /** Duration of stop in seconds */
+  duration: number;
+}
+
 /** Complete song data */
 export interface Song {
   /** Unique identifier */
@@ -156,7 +172,7 @@ export interface Song {
   title: string;
   /** Artist name */
   artist: string;
-  /** Beats per minute */
+  /** Beats per minute (initial BPM, or only BPM if no changes) */
   bpm: number;
   /** Audio offset in milliseconds */
   offset: number;
@@ -168,6 +184,16 @@ export interface Song {
   charts: Chart[];
   /** Song pack/folder name */
   pack?: string;
+  /** BPM changes throughout the song (optional, for variable BPM songs) */
+  bpmChanges?: BpmChange[];
+  /** Stops/freezes in the song (optional) */
+  stops?: Stop[];
+  /** Base path for loading audio/assets (for .sm files) */
+  basePath?: string;
+  /** Banner image path */
+  banner?: string;
+  /** Background image path */
+  background?: string;
 }
 
 /** Song pack/folder containing songs */
@@ -278,7 +304,7 @@ export const CMOD_OPTIONS = [0, 300, 400, 500, 600, 700, 800, 900, 1000] as cons
 
 /** Default settings */
 export const DEFAULT_SETTINGS: Settings = {
-  audioOffset: 0,
+  audioOffset: -180,
   visualOffset: 0,
   scrollSpeed: 1,
   cmod: 500, // Default to C500

@@ -1,4 +1,4 @@
-import type { JudgmentGrade, Note, Judgment, Direction } from '../types';
+import type { JudgmentGrade, Note, Judgment, Direction, BpmChange, Stop } from '../types';
 import { TIMING_WINDOWS } from '../types';
 
 // ============================================================================
@@ -169,4 +169,146 @@ export function getMeasureInfo(
   const measure = Math.floor(totalBeats / 4);
   const beatInMeasure = totalBeats % 4;
   return { measure, beatInMeasure };
+}
+
+// ============================================================================
+// BPM Change Aware Time Conversion
+// ============================================================================
+
+/**
+ * Convert beat to time in milliseconds, accounting for BPM changes and stops
+ * @param beat - Beat number
+ * @param bpmChanges - Array of BPM changes
+ * @param stops - Array of stops (song pauses)
+ * @param offset - Song offset in ms
+ * @returns Time in milliseconds
+ */
+export function beatToMsWithChanges(
+  beat: number,
+  bpmChanges: BpmChange[],
+  stops: Stop[] = [],
+  offset: number = 0
+): number {
+  if (bpmChanges.length === 0) {
+    // Fallback to 120 BPM
+    return offset + (beat * 60000) / 120;
+  }
+
+  let time = offset;
+  let currentBeat = 0;
+  let currentBpm = bpmChanges[0]?.bpm ?? 120;
+
+  // Process each BPM segment
+  for (let i = 0; i < bpmChanges.length; i++) {
+    const change = bpmChanges[i]!;
+    const nextChange = bpmChanges[i + 1];
+
+    if (change.beat > beat) {
+      break;
+    }
+
+    // Add time for segment from currentBeat to this change
+    if (change.beat > currentBeat) {
+      const segmentBeats = change.beat - currentBeat;
+      const msPerBeat = 60000 / currentBpm;
+      time += segmentBeats * msPerBeat;
+      currentBeat = change.beat;
+    }
+
+    currentBpm = change.bpm;
+
+    if (!nextChange || nextChange.beat > beat) {
+      const remainingBeats = beat - currentBeat;
+      const msPerBeat = 60000 / currentBpm;
+      time += remainingBeats * msPerBeat;
+      currentBeat = beat;
+      break;
+    }
+  }
+
+  // Add stops that occurred before this beat
+  for (const stop of stops) {
+    if (stop.beat <= beat) {
+      time += stop.duration * 1000;
+    }
+  }
+
+  return time;
+}
+
+/**
+ * Convert time in milliseconds to beat, accounting for BPM changes and stops
+ * @param ms - Time in milliseconds
+ * @param bpmChanges - Array of BPM changes
+ * @param stops - Array of stops
+ * @param offset - Song offset in ms
+ * @returns Beat number
+ */
+export function msToBeatWithChanges(
+  ms: number,
+  bpmChanges: BpmChange[],
+  stops: Stop[] = [],
+  offset: number = 0
+): number {
+  if (bpmChanges.length === 0) {
+    return ((ms - offset) * 120) / 60000;
+  }
+
+  // Subtract stop durations from effective time
+  let effectiveMs = ms - offset;
+  for (const stop of stops) {
+    const stopTime = beatToMsWithChanges(stop.beat, bpmChanges, [], 0);
+    if (ms - offset > stopTime) {
+      effectiveMs -= stop.duration * 1000;
+    }
+  }
+
+  let beat = 0;
+  let accumulatedMs = 0;
+  let currentBpm = bpmChanges[0]?.bpm ?? 120;
+
+  for (let i = 0; i < bpmChanges.length; i++) {
+    const change = bpmChanges[i]!;
+    const nextChange = bpmChanges[i + 1];
+
+    if (i > 0) {
+      currentBpm = change.bpm;
+    }
+
+    const nextBeat = nextChange?.beat ?? Infinity;
+    const msPerBeat = 60000 / currentBpm;
+    const segmentBeats = nextBeat - change.beat;
+    const segmentMs = segmentBeats * msPerBeat;
+
+    if (accumulatedMs + segmentMs >= effectiveMs) {
+      // Target is within this segment
+      const remainingMs = effectiveMs - accumulatedMs;
+      beat = change.beat + remainingMs / msPerBeat;
+      break;
+    }
+
+    accumulatedMs += segmentMs;
+    beat = nextBeat;
+  }
+
+  return beat;
+}
+
+/**
+ * Get the BPM at a specific beat
+ * @param beat - Beat number
+ * @param bpmChanges - Array of BPM changes
+ * @returns BPM at that beat
+ */
+export function getBpmAtBeat(beat: number, bpmChanges: BpmChange[]): number {
+  if (bpmChanges.length === 0) return 120;
+
+  let currentBpm = bpmChanges[0]?.bpm ?? 120;
+
+  for (const change of bpmChanges) {
+    if (change.beat > beat) break;
+    currentBpm = change.bpm;
+  }
+
+  return currentBpm;
 }

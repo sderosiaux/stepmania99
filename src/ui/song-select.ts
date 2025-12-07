@@ -1,6 +1,32 @@
 import type { Song, Chart, Settings, SongPack, Note } from '../types';
 import { THEME } from '../render';
-import { CMOD_OPTIONS, DEFAULT_SETTINGS } from '../types';
+import { DEFAULT_SETTINGS } from '../types';
+import { audioManager } from '../audio';
+
+// ============================================================================
+// BPM Display Helper
+// ============================================================================
+
+/**
+ * Format BPM for display - shows min-max range for variable BPM songs
+ */
+function formatBpm(song: Song): string {
+  if (!song.bpmChanges || song.bpmChanges.length <= 1) {
+    // Single BPM - truncate decimals
+    return `${Math.round(song.bpm)} BPM`;
+  }
+
+  // Multiple BPM changes - show min-max range
+  const bpms = song.bpmChanges.map((c) => c.bpm);
+  const minBpm = Math.round(Math.min(...bpms));
+  const maxBpm = Math.round(Math.max(...bpms));
+
+  if (minBpm === maxBpm) {
+    return `${minBpm} BPM`;
+  }
+
+  return `${minBpm}-${maxBpm} BPM`;
+}
 
 // ============================================================================
 // Chart Stats Calculator
@@ -180,18 +206,49 @@ export class SongSelectScreen {
   private selectedPackIndex: number = 0;
   private selectedSongIndex: number = 0;
   private selectedDifficultyIndex: number = 0;
-  private selectedCmodIndex: number = 6; // C800 default
+  private cmod: number = DEFAULT_SETTINGS.cmod;
+  private audioOffset: number = DEFAULT_SETTINGS.audioOffset;
   private difficultyFilter: DifficultyFilter = 'All';
   private activeColumn: 'packs' | 'songs' | 'difficulties' = 'packs';
   private callbacks: SongSelectCallbacks;
   private boundKeyHandler: (e: KeyboardEvent) => void;
   private hasBeenShown: boolean = false;
   private pendingRadarData: GrooveRadar | null = null;
+  private currentPreviewSongId: string | null = null;
+  private previewDebounceTimer: number | null = null;
 
   constructor(container: HTMLElement, callbacks: SongSelectCallbacks) {
     this.container = container;
     this.callbacks = callbacks;
     this.boundKeyHandler = this.handleKey.bind(this);
+    this.cmod = this.loadCmod();
+    this.audioOffset = this.loadAudioOffset();
+  }
+
+  private loadCmod(): number {
+    const saved = localStorage.getItem('cmod');
+    if (saved !== null) {
+      const parsed = parseInt(saved, 10);
+      if (!isNaN(parsed) && parsed >= 0 && parsed <= 2000) return parsed;
+    }
+    return DEFAULT_SETTINGS.cmod;
+  }
+
+  private saveCmod(): void {
+    localStorage.setItem('cmod', this.cmod.toString());
+  }
+
+  private loadAudioOffset(): number {
+    const saved = localStorage.getItem('audioOffset');
+    if (saved !== null) {
+      const parsed = parseInt(saved, 10);
+      if (!isNaN(parsed)) return parsed;
+    }
+    return DEFAULT_SETTINGS.audioOffset;
+  }
+
+  private saveAudioOffset(): void {
+    localStorage.setItem('audioOffset', this.audioOffset.toString());
   }
 
   show(songs: Song[]): void {
@@ -226,6 +283,52 @@ export class SongSelectScreen {
   hide(): void {
     window.removeEventListener('keydown', this.boundKeyHandler);
     this.container.innerHTML = '';
+    this.stopPreview();
+  }
+
+  private playPreview(song: Song): void {
+    // Don't replay if it's the same song
+    if (this.currentPreviewSongId === song.id) return;
+
+    // Clear any pending preview load
+    if (this.previewDebounceTimer !== null) {
+      clearTimeout(this.previewDebounceTimer);
+    }
+
+    // Debounce: wait 50ms before loading to avoid loading while fast-scrolling
+    this.previewDebounceTimer = window.setTimeout(async () => {
+      // Double-check we still want this song
+      if (this.currentPreviewSongId === song.id) return;
+
+      this.currentPreviewSongId = song.id;
+
+      try {
+        // Build audio path
+        const audioPath = song.basePath
+          ? `${song.basePath}/${song.musicFile}`
+          : `songs/${song.id}/${song.musicFile}`;
+
+        await audioManager.load(audioPath);
+
+        // Verify this is still the song we want (user may have navigated away during load)
+        if (this.currentPreviewSongId !== song.id) return;
+
+        // Start at preview time (previewStart is already in seconds)
+        audioManager.play(song.previewStart ?? 0);
+        audioManager.setVolume(0.5); // Lower volume for preview
+      } catch (error) {
+        console.warn('Failed to play preview:', error);
+      }
+    }, 150);
+  }
+
+  private stopPreview(): void {
+    if (this.previewDebounceTimer !== null) {
+      clearTimeout(this.previewDebounceTimer);
+      this.previewDebounceTimer = null;
+    }
+    audioManager.stop();
+    this.currentPreviewSongId = null;
   }
 
   private applyFilter(): void {
@@ -284,31 +387,49 @@ export class SongSelectScreen {
       case 'ArrowUp':
         e.preventDefault();
         if (this.activeColumn === 'packs') {
+          const prevPackIndex = this.selectedPackIndex;
           this.selectedPackIndex = Math.max(0, this.selectedPackIndex - 1);
-          this.selectedSongIndex = 0;
-          this.selectedDifficultyIndex = 0;
+          if (prevPackIndex !== this.selectedPackIndex) {
+            this.selectedSongIndex = 0;
+            this.selectedDifficultyIndex = 0;
+            this.render(); // Pack changed - need full render for new song list
+          }
         } else if (this.activeColumn === 'songs') {
+          const prevSongIndex = this.selectedSongIndex;
           this.selectedSongIndex = Math.max(0, this.selectedSongIndex - 1);
-          this.selectedDifficultyIndex = 0;
+          if (prevSongIndex !== this.selectedSongIndex) {
+            this.selectedDifficultyIndex = 0;
+            this.render(); // Song changed - need to update chart details
+          }
         } else if (this.activeColumn === 'difficulties' && currentSong) {
           this.selectedDifficultyIndex = Math.max(0, this.selectedDifficultyIndex - 1);
+          this.updateSelection(); // Just update selection class
+          this.updateChartDetails(); // Update only the chart details panel
         }
-        this.render();
         break;
 
       case 'ArrowDown':
         e.preventDefault();
         if (this.activeColumn === 'packs') {
+          const prevPackIndex = this.selectedPackIndex;
           this.selectedPackIndex = Math.min(this.packs.length - 1, this.selectedPackIndex + 1);
-          this.selectedSongIndex = 0;
-          this.selectedDifficultyIndex = 0;
+          if (prevPackIndex !== this.selectedPackIndex) {
+            this.selectedSongIndex = 0;
+            this.selectedDifficultyIndex = 0;
+            this.render(); // Pack changed - need full render for new song list
+          }
         } else if (this.activeColumn === 'songs' && currentPack) {
+          const prevSongIndex = this.selectedSongIndex;
           this.selectedSongIndex = Math.min(currentPack.songs.length - 1, this.selectedSongIndex + 1);
-          this.selectedDifficultyIndex = 0;
+          if (prevSongIndex !== this.selectedSongIndex) {
+            this.selectedDifficultyIndex = 0;
+            this.render(); // Song changed - need to update chart details
+          }
         } else if (this.activeColumn === 'difficulties' && currentSong) {
           this.selectedDifficultyIndex = Math.min(currentSong.charts.length - 1, this.selectedDifficultyIndex + 1);
+          this.updateSelection(); // Just update selection class
+          this.updateChartDetails(); // Update only the chart details panel
         }
-        this.render();
         break;
 
       case 'ArrowLeft':
@@ -340,8 +461,7 @@ export class SongSelectScreen {
         if (currentSong) {
           const chart = currentSong.charts[this.selectedDifficultyIndex];
           if (chart) {
-            const cmod = CMOD_OPTIONS[this.selectedCmodIndex] ?? DEFAULT_SETTINGS.cmod;
-            this.callbacks.onSongSelect(currentSong, chart, { cmod });
+            this.callbacks.onSongSelect(currentSong, chart, { cmod: this.cmod, audioOffset: this.audioOffset });
           }
         }
         break;
@@ -349,10 +469,11 @@ export class SongSelectScreen {
       case 'Tab':
         e.preventDefault();
         if (e.shiftKey) {
-          this.selectedCmodIndex = Math.max(0, this.selectedCmodIndex - 1);
+          this.cmod = Math.max(0, this.cmod - 50);
         } else {
-          this.selectedCmodIndex = Math.min(CMOD_OPTIONS.length - 1, this.selectedCmodIndex + 1);
+          this.cmod = Math.min(2000, this.cmod + 50);
         }
+        this.saveCmod();
         this.render();
         break;
 
@@ -361,8 +482,7 @@ export class SongSelectScreen {
         if (currentSong && this.callbacks.onDemo) {
           const chart = currentSong.charts[this.selectedDifficultyIndex];
           if (chart) {
-            const cmod = CMOD_OPTIONS[this.selectedCmodIndex] ?? DEFAULT_SETTINGS.cmod;
-            this.callbacks.onDemo(currentSong, chart, { cmod });
+            this.callbacks.onDemo(currentSong, chart, { cmod: this.cmod, audioOffset: this.audioOffset });
           }
         }
         break;
@@ -376,6 +496,22 @@ export class SongSelectScreen {
           this.activeColumn = 'packs';
           this.render();
         }
+        break;
+
+      case 'Equal': // + key (adjust offset up by 5ms)
+      case 'NumpadAdd':
+        e.preventDefault();
+        this.audioOffset += 5;
+        this.saveAudioOffset();
+        this.render();
+        break;
+
+      case 'Minus': // - key (adjust offset down by 5ms)
+      case 'NumpadSubtract':
+        e.preventDefault();
+        this.audioOffset -= 5;
+        this.saveAudioOffset();
+        this.render();
         break;
     }
   }
@@ -425,7 +561,6 @@ export class SongSelectScreen {
                     </div>
                     <div class="song-meta">
                       <span class="artist">${escapeHtml(song.artist)}</span>
-                      <span class="bpm">${song.bpm} BPM</span>
                     </div>
                   </div>
                 `;
@@ -465,7 +600,10 @@ export class SongSelectScreen {
         </div>
 
         <div class="footer">
-          ${this.renderCmodSelector()}
+          <div class="settings-row">
+            ${this.renderCmodSelector()}
+            ${this.renderOffsetSelector()}
+          </div>
           <div class="nav-hint">
             <span>↑↓ Navigate</span>
             <span>←→ Columns</span>
@@ -480,6 +618,82 @@ export class SongSelectScreen {
 
     this.addClickHandlers();
     this.drawGrooveRadar();
+    this.scrollSelectedIntoView();
+
+    // Play song preview
+    if (currentSong) {
+      this.playPreview(currentSong);
+    }
+  }
+
+  /**
+   * Update selection classes without rebuilding the entire DOM
+   */
+  private updateSelection(): void {
+    // Update pack selection
+    this.container.querySelectorAll('[data-pack]').forEach((el, i) => {
+      el.classList.toggle('selected', i === this.selectedPackIndex);
+    });
+
+    // Update song selection
+    this.container.querySelectorAll('[data-song]').forEach((el, i) => {
+      el.classList.toggle('selected', i === this.selectedSongIndex);
+    });
+
+    // Update difficulty selection
+    this.container.querySelectorAll('[data-diff-idx]').forEach((el, i) => {
+      el.classList.toggle('selected', i === this.selectedDifficultyIndex);
+    });
+
+    this.scrollSelectedIntoView();
+  }
+
+  /**
+   * Update only the chart details panel without full re-render
+   */
+  private updateChartDetails(): void {
+    const currentPack = this.packs[this.selectedPackIndex];
+    const currentSong = currentPack?.songs[this.selectedSongIndex];
+    const currentChart = currentSong?.charts[this.selectedDifficultyIndex];
+
+    const statsColumn = this.container.querySelector('.stats-column');
+    if (!statsColumn || !currentSong || !currentChart) return;
+
+    // Update just the chart details content (keeping the header)
+    const header = statsColumn.querySelector('.column-header');
+    if (header) {
+      statsColumn.innerHTML = '';
+      statsColumn.appendChild(header.cloneNode(true));
+
+      const detailsWrapper = document.createElement('div');
+      detailsWrapper.innerHTML = this.renderChartDetails(currentSong, currentChart);
+      statsColumn.appendChild(detailsWrapper.firstElementChild!);
+    }
+
+    this.drawGrooveRadar();
+  }
+
+  /**
+   * Scroll selected items into view in each column
+   */
+  private scrollSelectedIntoView(): void {
+    // Scroll selected pack into view (keep at bottom when scrolling up)
+    const selectedPack = this.container.querySelector('[data-pack].selected');
+    if (selectedPack) {
+      selectedPack.scrollIntoView({ block: 'end' });
+    }
+
+    // Scroll selected song into view (keep at bottom when scrolling up)
+    const selectedSong = this.container.querySelector('[data-song].selected');
+    if (selectedSong) {
+      selectedSong.scrollIntoView({ block: 'end' });
+    }
+
+    // Scroll selected difficulty into view (keep at bottom when scrolling up)
+    const selectedDiff = this.container.querySelector('[data-diff-idx].selected');
+    if (selectedDiff) {
+      selectedDiff.scrollIntoView({ block: 'end' });
+    }
   }
 
   private drawGrooveRadar(): void {
@@ -495,7 +709,7 @@ export class SongSelectScreen {
     const size = canvas.width;
     const centerX = size / 2;
     const centerY = size / 2;
-    const radius = size * 0.38;
+    const radius = size * 0.32;
 
     // Clear canvas
     ctx.clearRect(0, 0, size, size);
@@ -596,24 +810,24 @@ export class SongSelectScreen {
     }
 
     // Draw labels
-    ctx.font = 'bold 9px -apple-system, BlinkMacSystemFont, sans-serif';
+    ctx.font = 'bold 11px -apple-system, BlinkMacSystemFont, sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
     for (const dim of dimensions) {
-      const labelRadius = radius + 18;
+      const labelRadius = radius + 25;
       const x = centerX + Math.cos(dim.angle) * labelRadius;
       const y = centerY + Math.sin(dim.angle) * labelRadius;
 
       // Label background
       const metrics = ctx.measureText(dim.label);
-      const padding = 3;
+      const padding = 4;
       ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
       ctx.fillRect(
         x - metrics.width / 2 - padding,
-        y - 6 - padding,
+        y - 7 - padding,
         metrics.width + padding * 2,
-        12 + padding * 2
+        14 + padding * 2
       );
 
       // Label text
@@ -621,10 +835,10 @@ export class SongSelectScreen {
       ctx.fillText(dim.label, x, y);
 
       // Value below label
-      ctx.font = 'bold 8px -apple-system, BlinkMacSystemFont, sans-serif';
+      ctx.font = 'bold 10px -apple-system, BlinkMacSystemFont, sans-serif';
       ctx.fillStyle = '#00d4ff';
-      ctx.fillText(`${dim.value}`, x, y + 11);
-      ctx.font = 'bold 9px -apple-system, BlinkMacSystemFont, sans-serif';
+      ctx.fillText(`${dim.value}`, x, y + 13);
+      ctx.font = 'bold 11px -apple-system, BlinkMacSystemFont, sans-serif';
     }
   }
 
@@ -644,11 +858,14 @@ export class SongSelectScreen {
     return `
       <div class="chart-details">
         <div class="chart-header">
-          <h2 class="song-title">${escapeHtml(song.title)}</h2>
+          <div class="title-row">
+            <h2 class="song-title">${escapeHtml(song.title)}</h2>
+            <span class="song-duration">${formatDuration(stats.durationSec)}</span>
+          </div>
           <div class="song-artist">${escapeHtml(song.artist)}</div>
           <div class="chart-info-row">
             <span class="diff-badge" data-diff="${chart.difficulty}">${chart.difficulty} Lv.${chart.level}</span>
-            <span class="song-bpm">${song.bpm} BPM</span>
+            <span class="song-bpm">${formatBpm(song)}</span>
           </div>
         </div>
 
@@ -671,14 +888,12 @@ export class SongSelectScreen {
         `}
 
         <div class="radar-section">
-          <div class="section-title">GROOVE RADAR</div>
           <div class="radar-container">
-            <canvas id="groove-radar" class="radar-canvas" width="200" height="200"></canvas>
+            <canvas id="groove-radar" class="radar-canvas" width="280" height="280"></canvas>
           </div>
         </div>
 
         <div class="stats-section">
-          <div class="section-title">CHART STATS</div>
           <div class="stats-grid">
             <div class="stat-item">
               <span class="stat-value">${stats.totalNotes}</span>
@@ -697,10 +912,6 @@ export class SongSelectScreen {
               <span class="stat-label">Hands</span>
             </div>
             <div class="stat-item">
-              <span class="stat-value">${formatDuration(stats.durationSec)}</span>
-              <span class="stat-label">Length</span>
-            </div>
-            <div class="stat-item">
               <span class="stat-value">${stats.nps}</span>
               <span class="stat-label">Avg NPS</span>
             </div>
@@ -715,16 +926,24 @@ export class SongSelectScreen {
   }
 
   private renderCmodSelector(): string {
+    const displayValue = this.cmod === 0 ? 'BPM' : `C${this.cmod}`;
     return `
       <div class="cmod-selector">
         <span class="label">Speed:</span>
-        <div class="cmod-options">
-          ${CMOD_OPTIONS.map((cmod, i) => `
-            <div class="cmod-option ${i === this.selectedCmodIndex ? 'selected' : ''}" data-cmod="${i}">
-              ${cmod === 0 ? 'BPM' : `C${cmod}`}
-            </div>
-          `).join('')}
-        </div>
+        <button class="cmod-btn" data-cmod-delta="-50">−</button>
+        <div class="cmod-value">${displayValue}</div>
+        <button class="cmod-btn" data-cmod-delta="50">+</button>
+      </div>
+    `;
+  }
+
+  private renderOffsetSelector(): string {
+    return `
+      <div class="offset-selector">
+        <span class="label">Offset:</span>
+        <button class="offset-btn" data-offset-delta="-5">−</button>
+        <div class="offset-value">${this.audioOffset}ms</div>
+        <button class="offset-btn" data-offset-delta="5">+</button>
       </div>
     `;
   }
@@ -760,10 +979,22 @@ export class SongSelectScreen {
       });
     });
 
-    // CMod clicks
-    this.container.querySelectorAll('[data-cmod]').forEach(el => {
+    // CMod button clicks
+    this.container.querySelectorAll('[data-cmod-delta]').forEach(el => {
       el.addEventListener('click', () => {
-        this.selectedCmodIndex = parseInt((el as HTMLElement).dataset.cmod!, 10);
+        const delta = parseInt((el as HTMLElement).dataset.cmodDelta!, 10);
+        this.cmod = Math.max(0, Math.min(2000, this.cmod + delta));
+        this.saveCmod();
+        this.render();
+      });
+    });
+
+    // Offset button clicks
+    this.container.querySelectorAll('[data-offset-delta]').forEach(el => {
+      el.addEventListener('click', () => {
+        const delta = parseInt((el as HTMLElement).dataset.offsetDelta!, 10);
+        this.audioOffset += delta;
+        this.saveAudioOffset();
         this.render();
       });
     });
@@ -938,7 +1169,12 @@ export class SongSelectScreen {
       .song-details { padding: 1rem; }
       .song-title { font-size: 1.25rem; margin: 0 0 0.25rem 0; }
       .song-artist { color: ${THEME.text.secondary}; font-size: 0.9rem; }
-      .song-bpm { color: ${THEME.accent.primary}; font-size: 0.8rem; margin-top: 0.5rem; }
+      .song-bpm {
+        color: ${THEME.accent.primary};
+        font-size: 0.8rem;
+        display: flex;
+        align-items: center;
+      }
 
       .difficulty-tabs {
         display: flex;
@@ -987,6 +1223,16 @@ export class SongSelectScreen {
       /* Chart details in stats column */
       .chart-details { padding: 1rem; }
       .chart-header { margin-bottom: 1rem; }
+      .title-row {
+        display: flex;
+        align-items: baseline;
+        gap: 0.75rem;
+      }
+      .song-duration {
+        font-size: 0.9rem;
+        color: ${THEME.text.muted};
+        font-family: 'SF Mono', Monaco, monospace;
+      }
       .chart-info-row { display: flex; gap: 1rem; align-items: center; margin-top: 0.5rem; }
       .diff-badge {
         padding: 0.25rem 0.5rem;
@@ -1049,14 +1295,23 @@ export class SongSelectScreen {
       }
 
       .stat-item {
-        background: ${THEME.bg.tertiary};
-        padding: 0.6rem;
-        border-radius: 6px;
         text-align: center;
+        padding: 0.25rem;
       }
 
-      .stat-value { font-size: 1rem; font-weight: 700; display: block; }
-      .stat-label { font-size: 0.6rem; color: ${THEME.text.muted}; text-transform: uppercase; }
+      .stat-value {
+        font-size: 1.5rem;
+        font-weight: 700;
+        display: block;
+        color: ${THEME.text.primary};
+        font-family: monospace;
+      }
+      .stat-label {
+        font-size: 0.75rem;
+        color: ${THEME.text.secondary};
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
 
       .footer {
         display: flex;
@@ -1067,33 +1322,92 @@ export class SongSelectScreen {
         border-top: 1px solid ${THEME.bg.tertiary};
       }
 
-      .cmod-selector {
+      .settings-row {
+        display: flex;
+        gap: 2rem;
+        align-items: center;
+      }
+
+      .cmod-selector, .offset-selector {
         display: flex;
         align-items: center;
         gap: 0.5rem;
       }
 
-      .cmod-selector .label {
+      .cmod-selector .label, .offset-selector .label {
         font-size: 0.75rem;
         color: ${THEME.text.secondary};
       }
 
-      .cmod-options { display: flex; gap: 0.2rem; }
-
-      .cmod-option {
-        padding: 0.3rem 0.5rem;
-        background: ${THEME.bg.secondary};
+      .offset-value {
+        padding: 0.3rem 0.6rem;
+        background: rgba(0, 212, 255, 0.15);
         border-radius: 4px;
-        font-size: 0.7rem;
+        font-size: 0.8rem;
         font-weight: 600;
-        color: ${THEME.text.secondary};
-        cursor: pointer;
-        transition: all 0.15s ease;
+        color: ${THEME.accent.primary};
+        font-family: 'SF Mono', Monaco, monospace;
+        min-width: 60px;
+        text-align: center;
       }
 
-      .cmod-option:hover { background: ${THEME.bg.tertiary}; }
-      .cmod-option.selected {
-        background: rgba(0, 212, 255, 0.15);
+      .offset-btn {
+        width: 28px;
+        height: 28px;
+        border: none;
+        background: ${THEME.bg.tertiary};
+        color: ${THEME.text.primary};
+        border-radius: 4px;
+        font-size: 1rem;
+        font-weight: 700;
+        cursor: pointer;
+        transition: all 0.15s ease;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .offset-btn:hover {
+        background: ${THEME.accent.primary};
+        color: ${THEME.bg.primary};
+      }
+
+      .offset-btn:active {
+        transform: scale(0.95);
+      }
+
+      .cmod-btn {
+        width: 28px;
+        height: 28px;
+        border: none;
+        border-radius: 4px;
+        background: ${THEME.bg.secondary};
+        color: ${THEME.text.secondary};
+        font-size: 1rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.15s ease;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .cmod-btn:hover {
+        background: ${THEME.accent.primary};
+        color: ${THEME.bg.primary};
+      }
+
+      .cmod-btn:active {
+        transform: scale(0.95);
+      }
+
+      .cmod-value {
+        min-width: 50px;
+        padding: 0 0.5rem;
+        text-align: center;
+        font-family: monospace;
+        font-size: 0.85rem;
+        font-weight: 600;
         color: ${THEME.accent.primary};
       }
 

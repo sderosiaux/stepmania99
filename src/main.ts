@@ -2,7 +2,7 @@ import type { Song, Chart, GameScreen, ResultsData, Settings } from './types';
 import { DEFAULT_SETTINGS } from './types';
 import { audioManager } from './audio';
 import { GameController } from './core/game';
-import { loadAllSongs, createDemoSongs } from './core/loader';
+import { loadAllSongs } from './core/loader';
 import { SongSelectScreen, saveScore } from './ui/song-select';
 import { ResultsScreen } from './ui/results';
 
@@ -45,8 +45,9 @@ class App {
       onRetry: () => this.retryLastSong(),
     });
 
-    // Global keyboard handler for pause
-    window.addEventListener('keydown', this.handleGlobalKey.bind(this));
+    // Global keyboard handlers for pause/exit
+    window.addEventListener('keydown', this.handleGlobalKeyDown.bind(this));
+    window.addEventListener('keyup', this.handleGlobalKeyUp.bind(this));
   }
 
   /**
@@ -62,8 +63,8 @@ class App {
       // Load songs from disk
       const loadedSongs = await loadAllSongs();
 
-      // Always include demo songs, plus any loaded songs
-      this.songs = [...createDemoSongs(), ...loadedSongs];
+      // Use only real StepMania songs
+      this.songs = loadedSongs;
 
       // Hide loading, show song select immediately
       this.hideLoading();
@@ -179,19 +180,25 @@ class App {
   }
 
   /**
-   * Handle global keyboard events
+   * Handle global keydown events
    */
-  private handleGlobalKey(e: KeyboardEvent): void {
+  private handleGlobalKeyDown(e: KeyboardEvent): void {
     if (this.currentScreen === 'gameplay' && this.gameController) {
-      if (e.code === 'Escape') {
+      if (e.code === 'Escape' && !e.repeat) {
         e.preventDefault();
+
+        // Ignore ESC during countdown
+        if (this.gameController.isInCountdown()) {
+          return;
+        }
+
         if (this.gameController.isPaused()) {
-          // Already paused - quit to menu
+          // Already paused - exit to song select
           this.gameController.stop();
           this.gameController = null;
           this.showSongSelect();
         } else {
-          // Playing - pause the game
+          // Not paused - pause the game
           this.gameController.pause();
         }
       } else if (e.code === 'Enter' && this.gameController.isPaused()) {
@@ -199,6 +206,13 @@ class App {
         this.gameController.resume();
       }
     }
+  }
+
+  /**
+   * Handle global keyup events
+   */
+  private handleGlobalKeyUp(_e: KeyboardEvent): void {
+    // Reserved for future use
   }
 }
 

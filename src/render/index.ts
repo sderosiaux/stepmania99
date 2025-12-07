@@ -11,7 +11,7 @@ export const THEME = {
     primary: '#0a0a0f',
     secondary: '#12121a',
     tertiary: '#1a1a25',
-    overlay: 'rgba(0, 0, 0, 0.85)',
+    overlay: 'rgba(0, 0, 0, 0.5)',
   },
   // Text colors
   text: {
@@ -124,6 +124,12 @@ export class Renderer {
     up: [],
     right: [],
   };
+
+  /** All timing offsets (global) for average calculation */
+  private allTimings: number[] = [];
+
+  /** Current audio offset (for suggestion display) */
+  private currentAudioOffset: number = 0;
 
   /** Smoothed health for gradual background transitions */
   private smoothedHealth: number = 50;
@@ -432,6 +438,13 @@ export class Renderer {
     if (this.directionTimings[direction].length > 50) {
       this.directionTimings[direction].shift();
     }
+
+    // Also track global timings
+    this.allTimings.push(timingDiff);
+    // Keep only last 100 timings globally
+    if (this.allTimings.length > 100) {
+      this.allTimings.shift();
+    }
   }
 
   /**
@@ -444,9 +457,17 @@ export class Renderer {
       up: [],
       right: [],
     };
+    this.allTimings = [];
     // Reset smoothed health to starting value
     this.smoothedHealth = 50;
     this.lastFrameTime = 0;
+  }
+
+  /**
+   * Set the current audio offset (for displaying suggested offset)
+   */
+  setAudioOffset(offset: number): void {
+    this.currentAudioOffset = offset;
   }
 
   /**
@@ -476,16 +497,35 @@ export class Renderer {
    * Draw per-direction timing stats with visual slider bars
    */
   drawTimingStats(): void {
-    const statsX = this.columnX.right + LAYOUT.arrowSize / 2 + 25;
-    const startY = this.receptorY - 30;
-    const rowHeight = 28;
-    const barWidth = 80;
-    const barHeight = 6;
+    const statsX = this.columnX.right + LAYOUT.arrowSize / 2 + 40;
+    const startY = this.receptorY - 20;
+    const rowHeight = 36;
+    const barWidth = 100;
+    const barHeight = 8;
+
+    // Calculate panel dimensions
+    const panelPadding = 25;
+    const panelX = statsX - panelPadding;
+    const panelY = startY - 35;
+    const panelWidth = barWidth + 110;
+    // Height includes: per-direction rows + global stats section
+    const panelHeight = DIRECTIONS.length * rowHeight + 160;
 
     this.ctx.save();
 
+    // Draw panel background
+    this.ctx.fillStyle = 'rgba(18, 18, 26, 0.85)';
+    this.roundRect(panelX, panelY, panelWidth, panelHeight, 10);
+    this.ctx.fill();
+
+    // Panel border
+    this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+    this.ctx.lineWidth = 1;
+    this.roundRect(panelX, panelY, panelWidth, panelHeight, 10);
+    this.ctx.stroke();
+
     // Title
-    this.ctx.font = '10px -apple-system, sans-serif';
+    this.ctx.font = '12px -apple-system, sans-serif';
     this.ctx.fillStyle = THEME.text.muted;
     this.ctx.textAlign = 'left';
     this.ctx.fillText('TIMING', statsX, startY - 5);
@@ -497,11 +537,12 @@ export class Renderer {
 
       // Direction indicator with color
       this.ctx.fillStyle = THEME.arrows[dir];
-      this.ctx.font = '14px -apple-system, sans-serif';
+      this.ctx.font = '20px -apple-system, sans-serif';
+      this.ctx.textAlign = 'center';
       const arrow = dir === 'left' ? '←' : dir === 'down' ? '↓' : dir === 'up' ? '↑' : '→';
-      this.ctx.fillText(arrow, statsX, y + 4);
+      this.ctx.fillText(arrow, statsX + 10, y + 6);
 
-      const barX = statsX + 20;
+      const barX = statsX + 35;
 
       // Draw bar background
       this.ctx.fillStyle = THEME.bg.tertiary;
@@ -512,12 +553,12 @@ export class Renderer {
       this.ctx.fillRect(barX + barWidth / 2 - 0.5, y - barHeight / 2 - 2, 1, barHeight + 4);
 
       // Draw "EARLY" and "LATE" labels (small)
-      this.ctx.font = '7px -apple-system, sans-serif';
+      this.ctx.font = '9px -apple-system, sans-serif';
       this.ctx.fillStyle = THEME.text.muted;
       this.ctx.textAlign = 'left';
-      this.ctx.fillText('E', barX - 8, y + 2);
+      this.ctx.fillText('E', barX - 10, y + 2);
       this.ctx.textAlign = 'right';
-      this.ctx.fillText('L', barX + barWidth + 8, y + 2);
+      this.ctx.fillText('L', barX + barWidth + 10, y + 2);
 
       if (timings.length > 0) {
         // Calculate average
@@ -553,21 +594,107 @@ export class Renderer {
         this.ctx.fillRect(indicatorX - 1, y - barHeight / 2, 2, barHeight);
 
         // Draw ms value
-        this.ctx.font = '9px monospace';
+        this.ctx.font = '11px monospace';
         this.ctx.textAlign = 'center';
         this.ctx.fillStyle = color;
         const sign = avgMs >= 0 ? '+' : '';
-        this.ctx.fillText(`${sign}${avgMs}`, indicatorX, y + barHeight / 2 + 10);
+        this.ctx.fillText(`${sign}${avgMs}`, indicatorX, y + barHeight / 2 + 12);
       } else {
         // No data yet
-        this.ctx.font = '9px monospace';
+        this.ctx.font = '11px monospace';
         this.ctx.textAlign = 'center';
         this.ctx.fillStyle = THEME.text.muted;
-        this.ctx.fillText('--', barX + barWidth / 2, y + barHeight / 2 + 10);
+        this.ctx.fillText('--', barX + barWidth / 2, y + barHeight / 2 + 12);
       }
     }
 
+    // Draw global average and offset suggestion below the per-direction stats
+    const globalY = startY + DIRECTIONS.length * rowHeight + 40;
+    this.drawGlobalTimingStats(statsX, globalY, barWidth);
+
     this.ctx.restore();
+  }
+
+  /**
+   * Draw global timing average and offset suggestion
+   */
+  private drawGlobalTimingStats(x: number, y: number, barWidth: number): void {
+    if (this.allTimings.length === 0) {
+      // No data yet
+      this.ctx.font = '12px -apple-system, sans-serif';
+      this.ctx.fillStyle = THEME.text.muted;
+      this.ctx.textAlign = 'left';
+      this.ctx.fillText('Waiting for data...', x, y);
+      return;
+    }
+
+    // Calculate global average
+    const globalAvg = this.allTimings.reduce((a, b) => a + b, 0) / this.allTimings.length;
+    const globalAvgMs = Math.round(globalAvg);
+
+    // Calculate last 10 average for recent trend
+    const last10 = this.allTimings.slice(-10);
+    const last10Avg = last10.reduce((a, b) => a + b, 0) / last10.length;
+    const last10Ms = Math.round(last10Avg);
+
+    // Color based on timing
+    const getColor = (ms: number) => {
+      if (ms < -10) return '#4fc3f7'; // Early - blue
+      if (ms > 10) return '#ff7043'; // Late - orange
+      return '#66bb6a'; // Good - green
+    };
+
+    const globalColor = getColor(globalAvgMs);
+    const last10Color = getColor(last10Ms);
+
+    // Draw separator line
+    this.ctx.fillStyle = THEME.bg.tertiary;
+    this.ctx.fillRect(x, y - 12, barWidth + 40, 1);
+
+    // Global average label and value (show count)
+    this.ctx.font = '12px -apple-system, sans-serif';
+    this.ctx.fillStyle = THEME.text.muted;
+    this.ctx.textAlign = 'left';
+    this.ctx.fillText(`AVG (${this.allTimings.length})`, x, y + 6);
+
+    this.ctx.font = 'bold 16px monospace';
+    this.ctx.fillStyle = globalColor;
+    const globalSign = globalAvgMs >= 0 ? '+' : '';
+    this.ctx.fillText(`${globalSign}${globalAvgMs}ms`, x + 65, y + 6);
+
+    // Early/Late indicator
+    if (Math.abs(globalAvgMs) > 5) {
+      const label = globalAvgMs < 0 ? '(early)' : '(late)';
+      this.ctx.font = '11px -apple-system, sans-serif';
+      this.ctx.fillStyle = globalColor;
+      this.ctx.fillText(label, x + 120, y + 6);
+    }
+
+    // Last 10 average
+    this.ctx.font = '12px -apple-system, sans-serif';
+    this.ctx.fillStyle = THEME.text.muted;
+    this.ctx.fillText('Last 10', x, y + 26);
+
+    this.ctx.font = 'bold 14px monospace';
+    this.ctx.fillStyle = last10Color;
+    const last10Sign = last10Ms >= 0 ? '+' : '';
+    this.ctx.fillText(`${last10Sign}${last10Ms}ms`, x + 55, y + 26);
+
+    // Offset suggestion (only if enough data and significant deviation)
+    // If late (+ms): decrease offset (more negative) so notes appear later relative to audio
+    // If early (-ms): increase offset (less negative) so notes appear earlier relative to audio
+    if (this.allTimings.length >= 5 && Math.abs(globalAvgMs) > 5) {
+      const suggestedOffset = Math.round(this.currentAudioOffset - globalAvg);
+
+      this.ctx.font = '12px -apple-system, sans-serif';
+      this.ctx.fillStyle = THEME.text.muted;
+      this.ctx.fillText('Try offset', x, y + 50);
+
+      // Current → Suggested
+      this.ctx.font = 'bold 13px monospace';
+      this.ctx.fillStyle = THEME.accent.warning;
+      this.ctx.fillText(`${this.currentAudioOffset} → ${suggestedOffset}`, x + 68, y + 50);
+    }
   }
 
   /**
@@ -1232,6 +1359,30 @@ export class Renderer {
   }
 
   /**
+   * Draw song title and artist (top left)
+   */
+  drawSongInfo(title: string, artist: string): void {
+    this.ctx.save();
+
+    const x = 20;
+    const y = 25;
+
+    // Song title - large white text
+    this.ctx.font = 'bold 28px -apple-system, sans-serif';
+    this.ctx.textAlign = 'left';
+    this.ctx.textBaseline = 'top';
+    this.ctx.fillStyle = THEME.text.primary;
+    this.ctx.fillText(title, x, y);
+
+    // Artist - smaller, slightly muted
+    this.ctx.font = '18px -apple-system, sans-serif';
+    this.ctx.fillStyle = THEME.text.secondary;
+    this.ctx.fillText(artist, x, y + 34);
+
+    this.ctx.restore();
+  }
+
+  /**
    * Draw progress bar (centered, matching lane width)
    */
   drawProgress(current: number, total: number): void {
@@ -1363,6 +1514,7 @@ export class Renderer {
     this.setCombo(state.combo, currentTime);
     this.drawCombo(currentTime);
     this.drawScore(state.score);
+    this.drawSongInfo(state.song.title, state.song.artist);
     this.drawHealthBar(health);
     this.drawProgress(currentTime, state.chart.notes[state.chart.notes.length - 1]?.endTime ?? state.chart.notes[state.chart.notes.length - 1]?.time ?? 0);
 
