@@ -737,6 +737,17 @@ export class Renderer {
    * Draw the lane backgrounds
    */
   drawLanes(): void {
+    if (this.noteSkin === 'gems') {
+      this.drawLanes3D();
+    } else {
+      this.drawLanesFlat();
+    }
+  }
+
+  /**
+   * Draw flat 2D lanes (DDR style)
+   */
+  private drawLanesFlat(): void {
     const laneWidth = LAYOUT.arrowSize;
 
     this.ctx.fillStyle = THEME.bg.secondary;
@@ -758,6 +769,102 @@ export class Renderer {
       this.ctx.beginPath();
       this.ctx.moveTo(x + laneWidth, 0);
       this.ctx.lineTo(x + laneWidth, this.height);
+      this.ctx.stroke();
+    }
+  }
+
+  /**
+   * Draw 3D perspective lanes (Guitar Hero style)
+   */
+  private drawLanes3D(): void {
+    const laneWidth = LAYOUT.arrowSize;
+    const centerX = this.width / 2;
+
+    // Vanishing point settings
+    const vanishingY = this.height * 0.35;
+    const horizonScale = 0.15; // How narrow lanes are at vanishing point
+
+    // Calculate lane positions at receptor (bottom)
+    const lanePositions: { left: number; right: number }[] = [];
+    for (const dir of DIRECTIONS) {
+      const x = this.columnX[dir];
+      lanePositions.push({
+        left: x - laneWidth / 2,
+        right: x + laneWidth / 2,
+      });
+    }
+
+    // Draw lane backgrounds as trapezoids
+    for (let i = 0; i < DIRECTIONS.length; i++) {
+      const lane = lanePositions[i]!;
+
+      // Bottom positions (at receptor)
+      const bottomLeft = lane.left;
+      const bottomRight = lane.right;
+
+      // Top positions (at vanishing point) - converge towards center
+      const topLeft = centerX + (lane.left - centerX) * horizonScale;
+      const topRight = centerX + (lane.right - centerX) * horizonScale;
+
+      // Draw lane fill with gradient
+      const gradient = this.ctx.createLinearGradient(0, vanishingY, 0, this.receptorY);
+      gradient.addColorStop(0, 'rgba(18, 18, 26, 0.3)'); // Faded at top
+      gradient.addColorStop(0.5, 'rgba(18, 18, 26, 0.7)');
+      gradient.addColorStop(1, THEME.bg.secondary); // Full at bottom
+
+      this.ctx.fillStyle = gradient;
+      this.ctx.beginPath();
+      this.ctx.moveTo(topLeft, vanishingY);
+      this.ctx.lineTo(topRight, vanishingY);
+      this.ctx.lineTo(bottomRight, this.receptorY);
+      this.ctx.lineTo(bottomLeft, this.receptorY);
+      this.ctx.closePath();
+      this.ctx.fill();
+
+      // Draw lane edge lines
+      const lineGradient = this.ctx.createLinearGradient(0, vanishingY, 0, this.receptorY);
+      lineGradient.addColorStop(0, 'rgba(40, 40, 60, 0.2)');
+      lineGradient.addColorStop(1, THEME.bg.tertiary);
+
+      this.ctx.strokeStyle = lineGradient;
+      this.ctx.lineWidth = 1;
+
+      // Left edge
+      this.ctx.beginPath();
+      this.ctx.moveTo(topLeft, vanishingY);
+      this.ctx.lineTo(bottomLeft, this.receptorY);
+      this.ctx.stroke();
+
+      // Right edge
+      this.ctx.beginPath();
+      this.ctx.moveTo(topRight, vanishingY);
+      this.ctx.lineTo(bottomRight, this.receptorY);
+      this.ctx.stroke();
+    }
+
+    // Draw horizontal "fret" lines for depth
+    const numFrets = 8;
+    for (let i = 1; i < numFrets; i++) {
+      const t = i / numFrets;
+      // Non-linear spacing for perspective effect
+      const perspectiveT = Math.pow(t, 1.5);
+      const y = vanishingY + (this.receptorY - vanishingY) * perspectiveT;
+      const scale = horizonScale + (1 - horizonScale) * perspectiveT;
+
+      // Calculate the full lane width at this y position
+      const firstLane = lanePositions[0]!;
+      const lastLane = lanePositions[DIRECTIONS.length - 1]!;
+      const leftX = centerX + (firstLane.left - centerX) * scale;
+      const rightX = centerX + (lastLane.right - centerX) * scale;
+
+      // Alpha fades with distance
+      const alpha = 0.1 + 0.15 * perspectiveT;
+
+      this.ctx.strokeStyle = `rgba(60, 60, 80, ${alpha})`;
+      this.ctx.lineWidth = 1;
+      this.ctx.beginPath();
+      this.ctx.moveTo(leftX, y);
+      this.ctx.lineTo(rightX, y);
       this.ctx.stroke();
     }
   }
