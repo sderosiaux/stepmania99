@@ -34,3 +34,4 @@ npm-debug.log*
 public/songs/*
 !public/songs/.gitkeep
 !public/songs/_Mazu
+!public/songs/Virtual Test Lab

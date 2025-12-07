@@ -20,6 +20,9 @@ export class AudioManager {
   /** Cache of loaded audio buffers */
   private cache: Map<string, AudioBuffer> = new Map();
 
+  /** Duration for virtual (silent) songs in seconds */
+  private static readonly VIRTUAL_SONG_DURATION = 300; // 5 minutes
+
   /**
    * Initialize or resume the audio context
    * Must be called after user interaction (browser policy)
@@ -51,6 +54,30 @@ export class AudioManager {
   }
 
   /**
+   * Create a silent audio buffer for virtual songs
+   * @param duration - Duration in seconds
+   */
+  private createSilentBuffer(duration: number): AudioBuffer {
+    if (!this.context) {
+      throw new Error('AudioManager not initialized');
+    }
+
+    const sampleRate = this.context.sampleRate;
+    const numSamples = Math.floor(sampleRate * duration);
+    const buffer = this.context.createBuffer(2, numSamples, sampleRate);
+
+    // Buffer is already filled with zeros (silence)
+    return buffer;
+  }
+
+  /**
+   * Check if a URL points to a virtual (no audio) song
+   */
+  private isVirtualSong(url: string): boolean {
+    return url.endsWith('/virtual') || url.endsWith('virtual.mp3') || url.endsWith('virtual.ogg');
+  }
+
+  /**
    * Load an audio file
    * @param url - URL or path to the audio file
    * @returns Promise that resolves when loaded
@@ -63,6 +90,15 @@ export class AudioManager {
     }
 
     await this.init();
+
+    // Handle virtual songs (no actual audio file)
+    if (this.isVirtualSong(url)) {
+      const silentBuffer = this.createSilentBuffer(AudioManager.VIRTUAL_SONG_DURATION);
+      this.cache.set(url, silentBuffer);
+      this.currentBuffer = silentBuffer;
+      console.log(`Loaded virtual song with ${AudioManager.VIRTUAL_SONG_DURATION}s silent audio`);
+      return;
+    }
 
     const response = await fetch(url);
     if (!response.ok) {
