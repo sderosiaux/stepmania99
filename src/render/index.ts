@@ -1342,90 +1342,86 @@ export class Renderer {
    * Draw a hold/freeze note
    */
   private drawHoldNote(note: Note, currentTime: number, pixelsPerMs: number): void {
+    const isGems = this.noteSkin === 'gems';
+
+    if (isGems) {
+      this.drawHoldNote3D(note, currentTime, pixelsPerMs);
+    } else {
+      this.drawHoldNoteFlat(note, currentTime, pixelsPerMs);
+    }
+  }
+
+  /**
+   * Draw hold note for DDR style (flat, notes come from bottom)
+   */
+  private drawHoldNoteFlat(note: Note, currentTime: number, pixelsPerMs: number): void {
     const x = this.columnX[note.direction];
-    // Hold body is always yellowish/gold
     const holdBodyColor = '#ffcc00';
     const holdState = note.holdState;
 
-    // Calculate positions
     const headTimeDiff = note.time - currentTime;
     const tailTimeDiff = (note.endTime ?? note.time) - currentTime;
 
     let headY = this.receptorY + headTimeDiff * pixelsPerMs;
     const tailY = this.receptorY + tailTimeDiff * pixelsPerMs;
 
-    // If hold started, keep head locked at receptor (don't let it scroll past)
     if (holdState?.started && !holdState?.dropped) {
       headY = this.receptorY;
     }
 
-    // Determine hold state for coloring
     const isActive = holdState?.isHeld && holdState?.started && !holdState?.completed;
     const isDropped = holdState?.dropped;
     const bodyWidth = LAYOUT.arrowSize * 0.45;
 
     this.ctx.save();
 
-    // Draw hold body (from head to tail)
     const bodyTop = Math.min(headY, tailY);
     const bodyBottom = Math.max(headY, tailY);
     const bodyHeight = bodyBottom - bodyTop;
 
     if (bodyHeight > 0) {
-      // Body gradient
       const bodyGradient = this.ctx.createLinearGradient(x - bodyWidth / 2, 0, x + bodyWidth / 2, 0);
 
       if (isDropped) {
-        // Dropped: gray/dark
         bodyGradient.addColorStop(0, '#333344');
         bodyGradient.addColorStop(0.5, '#444455');
         bodyGradient.addColorStop(1, '#333344');
       } else if (isActive) {
-        // Active: bright glowing yellow
         const rgb = this.hexToRgb(holdBodyColor);
         bodyGradient.addColorStop(0, `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.9)`);
         bodyGradient.addColorStop(0.5, `rgba(${Math.min(255, rgb.r + 80)}, ${Math.min(255, rgb.g + 80)}, ${Math.min(255, rgb.b + 80)}, 1)`);
         bodyGradient.addColorStop(1, `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.9)`);
-
-        // Glow effect
         this.ctx.shadowColor = holdBodyColor;
         this.ctx.shadowBlur = 15;
       } else {
-        // Idle: yellow color
         const rgb = this.hexToRgb(holdBodyColor);
         bodyGradient.addColorStop(0, `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.6)`);
         bodyGradient.addColorStop(0.5, `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.8)`);
         bodyGradient.addColorStop(1, `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.6)`);
       }
 
-      // Draw body rectangle
       this.ctx.fillStyle = bodyGradient;
       this.roundRect(x - bodyWidth / 2, bodyTop, bodyWidth, bodyHeight, 4);
       this.ctx.fill();
 
-      // Inner glow stripe
       if (!isDropped) {
         const innerWidth = bodyWidth * 0.3;
         const innerGradient = this.ctx.createLinearGradient(x - innerWidth / 2, 0, x + innerWidth / 2, 0);
         innerGradient.addColorStop(0, 'rgba(255, 255, 255, 0)');
         innerGradient.addColorStop(0.5, `rgba(255, 255, 255, ${isActive ? 0.5 : 0.2})`);
         innerGradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
-
         this.ctx.fillStyle = innerGradient;
         this.ctx.fillRect(x - innerWidth / 2, bodyTop + 4, innerWidth, bodyHeight - 8);
       }
-
       this.ctx.shadowBlur = 0;
     }
 
-    // Draw head - always visible while holding, fades when dropped
     if (!holdState?.completed) {
       const headAlpha = isDropped ? 0.4 : 1;
       const beatColor = this.getBeatColor(note.beat);
       this.drawArrow(x, headY, note.direction, headAlpha, false, beatColor);
     }
 
-    // Draw tail cap (also yellowish)
     if (tailY > 0 && tailY < this.height + LAYOUT.arrowSize) {
       const capHeight = LAYOUT.arrowSize * 0.3;
       const capGradient = this.ctx.createLinearGradient(0, tailY - capHeight, 0, tailY);
@@ -1443,11 +1439,139 @@ export class Renderer {
       this.roundRect(x - bodyWidth / 2, tailY - capHeight, bodyWidth, capHeight, 4);
       this.ctx.fill();
 
-      // Cap border
       this.ctx.strokeStyle = isDropped ? '#555566' : this.darkenColor(holdBodyColor, 20);
       this.ctx.lineWidth = 2;
       this.roundRect(x - bodyWidth / 2, tailY - capHeight, bodyWidth, capHeight, 4);
       this.ctx.stroke();
+    }
+
+    this.ctx.restore();
+  }
+
+  /**
+   * Draw hold note for Guitar Hero style (3D perspective, notes come from top)
+   */
+  private drawHoldNote3D(note: Note, currentTime: number, pixelsPerMs: number): void {
+    const holdBodyColor = '#ffcc00';
+    const holdState = note.holdState;
+    const centerX = this.width / 2;
+    const baseX = this.columnX[note.direction];
+
+    // Perspective settings (must match drawLanes3D and drawNotes)
+    const vanishingY = this.height * 0.35;
+    const horizonScale = 0.15;
+    const perspectiveRange = this.receptorY - vanishingY;
+
+    // Calculate time differences
+    const headTimeDiff = note.time - currentTime;
+    const tailTimeDiff = (note.endTime ?? note.time) - currentTime;
+
+    // Calculate Y positions (gems: notes come from above)
+    let headY = this.receptorY - headTimeDiff * pixelsPerMs;
+    let tailY = this.receptorY - tailTimeDiff * pixelsPerMs;
+
+    // If hold started, keep head locked at receptor
+    if (holdState?.started && !holdState?.dropped) {
+      headY = this.receptorY;
+    }
+
+    // Clamp to visible range
+    headY = Math.max(vanishingY, Math.min(this.receptorY, headY));
+    tailY = Math.max(vanishingY, Math.min(this.height, tailY));
+
+    // Calculate perspective scale and X position for head and tail
+    const getScaleAndX = (y: number) => {
+      if (y >= this.receptorY) return { scale: 1, x: baseX };
+      const distanceFromReceptor = this.receptorY - y;
+      const normalizedDistance = Math.min(1, distanceFromReceptor / perspectiveRange);
+      const scale = 1 - normalizedDistance * (1 - horizonScale);
+      const x = centerX + (baseX - centerX) * scale;
+      return { scale, x };
+    };
+
+    const head = getScaleAndX(headY);
+    const tail = getScaleAndX(tailY);
+
+    const isActive = holdState?.isHeld && holdState?.started && !holdState?.completed;
+    const isDropped = holdState?.dropped;
+    const bodyWidthBase = LAYOUT.arrowSize * 0.45;
+
+    this.ctx.save();
+
+    // Draw hold body as a trapezoid (perspective)
+    const headWidth = bodyWidthBase * head.scale;
+    const tailWidth = bodyWidthBase * tail.scale;
+
+    if (Math.abs(headY - tailY) > 2) {
+      // Draw trapezoid body
+      this.ctx.beginPath();
+      this.ctx.moveTo(tail.x - tailWidth / 2, tailY);
+      this.ctx.lineTo(tail.x + tailWidth / 2, tailY);
+      this.ctx.lineTo(head.x + headWidth / 2, headY);
+      this.ctx.lineTo(head.x - headWidth / 2, headY);
+      this.ctx.closePath();
+
+      // Body gradient
+      const bodyGradient = this.ctx.createLinearGradient(0, tailY, 0, headY);
+      if (isDropped) {
+        bodyGradient.addColorStop(0, '#333344');
+        bodyGradient.addColorStop(1, '#444455');
+      } else if (isActive) {
+        const rgb = this.hexToRgb(holdBodyColor);
+        bodyGradient.addColorStop(0, `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.9)`);
+        bodyGradient.addColorStop(1, `rgba(${Math.min(255, rgb.r + 80)}, ${Math.min(255, rgb.g + 80)}, ${Math.min(255, rgb.b + 80)}, 1)`);
+        this.ctx.shadowColor = holdBodyColor;
+        this.ctx.shadowBlur = 15;
+      } else {
+        const rgb = this.hexToRgb(holdBodyColor);
+        bodyGradient.addColorStop(0, `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.4)`);
+        bodyGradient.addColorStop(1, `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.8)`);
+      }
+
+      this.ctx.fillStyle = bodyGradient;
+      this.ctx.fill();
+
+      // Inner glow stripe
+      if (!isDropped) {
+        const innerHeadWidth = headWidth * 0.3;
+        const innerTailWidth = tailWidth * 0.3;
+
+        this.ctx.beginPath();
+        this.ctx.moveTo(tail.x - innerTailWidth / 2, tailY);
+        this.ctx.lineTo(tail.x + innerTailWidth / 2, tailY);
+        this.ctx.lineTo(head.x + innerHeadWidth / 2, headY);
+        this.ctx.lineTo(head.x - innerHeadWidth / 2, headY);
+        this.ctx.closePath();
+
+        const innerGradient = this.ctx.createLinearGradient(0, tailY, 0, headY);
+        innerGradient.addColorStop(0, `rgba(255, 255, 255, ${isActive ? 0.2 : 0.1})`);
+        innerGradient.addColorStop(1, `rgba(255, 255, 255, ${isActive ? 0.5 : 0.2})`);
+        this.ctx.fillStyle = innerGradient;
+        this.ctx.fill();
+      }
+      this.ctx.shadowBlur = 0;
+    }
+
+    // Draw head gem with perspective
+    if (!holdState?.completed) {
+      const headAlpha = isDropped ? 0.4 : 1;
+      const beatColor = this.getBeatColor(note.beat);
+      this.drawArrowWithScale(head.x, headY, note.direction, headAlpha, false, beatColor, head.scale);
+    }
+
+    // Draw tail cap with perspective (at the far end)
+    if (tailY > vanishingY && tailY < this.receptorY) {
+      const capHeight = LAYOUT.arrowSize * 0.2 * tail.scale;
+
+      this.ctx.beginPath();
+      this.ctx.ellipse(tail.x, tailY, tailWidth / 2, capHeight / 2, 0, 0, Math.PI * 2);
+
+      if (isDropped) {
+        this.ctx.fillStyle = '#444455';
+      } else {
+        this.ctx.fillStyle = this.darkenColor(holdBodyColor, 20);
+      }
+      this.ctx.fill();
     }
 
     this.ctx.restore();
