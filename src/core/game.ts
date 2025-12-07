@@ -102,6 +102,30 @@ export class GameController {
   }
 
   /**
+   * Apply visual feedback for a judgment (receptor glow, flash, judgment display, hit effect)
+   */
+  private applyJudgmentFeedback(
+    direction: import('../types').Direction,
+    grade: import('../types').JudgmentGrade,
+    currentTime: number,
+    timingDiff: number = 0
+  ): void {
+    this.renderer.triggerReceptorGlow(direction, currentTime);
+    this.renderer.triggerBackgroundFlash(direction, currentTime);
+    this.renderer.setJudgment(grade, currentTime, timingDiff);
+    this.renderer.addHitEffect(direction, grade, currentTime);
+  }
+
+  /**
+   * Sync gameplay state combo/maxCombo from score state
+   */
+  private syncStateFromScore(): void {
+    if (!this.state || !this.scoreState) return;
+    this.state.combo = this.scoreState.combo;
+    this.state.maxCombo = this.scoreState.maxCombo;
+  }
+
+  /**
    * Start a new game with the given song and chart
    */
   async start(song: Song, chart: Chart, autoplay: boolean = false): Promise<void> {
@@ -380,24 +404,14 @@ export class GameController {
           const prevCombo = this.scoreState.combo;
           this.scoreState = applyJudgment(this.scoreState, judgment);
 
-          // Update state
-          this.state.combo = this.scoreState.combo;
-          this.state.maxCombo = this.scoreState.maxCombo;
+          this.syncStateFromScore();
+          this.applyJudgmentFeedback(input.direction, judgment.grade, currentTime, judgment.timingDiff);
 
-          // Trigger visual feedback
-          this.renderer.triggerReceptorGlow(input.direction, currentTime);
-          this.renderer.triggerBackgroundFlash(input.direction, currentTime);
-          this.renderer.setJudgment(judgment.grade, currentTime, judgment.timingDiff);
-          this.renderer.addHitEffect(input.direction, judgment.grade, currentTime);
-
-          // Record timing for per-direction stats (skip misses)
           if (judgment.grade !== 'miss') {
             this.renderer.recordTiming(input.direction, judgment.timingDiff);
           }
 
-          // Emit events
           this.emit({ type: 'judgment', data: judgment });
-
           if (prevCombo > 0 && this.scoreState.combo === 0) {
             this.emit({ type: 'combo-break' });
           }
@@ -405,31 +419,18 @@ export class GameController {
           // Regular tap note
           note.judged = true;
           note.judgment = judgment;
-
           this.state.judgments.push(judgment);
 
-          // Update score
           const prevCombo = this.scoreState.combo;
           this.scoreState = applyJudgment(this.scoreState, judgment);
+          this.syncStateFromScore();
+          this.applyJudgmentFeedback(input.direction, judgment.grade, currentTime, judgment.timingDiff);
 
-          // Update state
-          this.state.combo = this.scoreState.combo;
-          this.state.maxCombo = this.scoreState.maxCombo;
-
-          // Trigger visual feedback
-          this.renderer.triggerReceptorGlow(input.direction, currentTime);
-          this.renderer.triggerBackgroundFlash(input.direction, currentTime);
-          this.renderer.setJudgment(judgment.grade, currentTime, judgment.timingDiff);
-          this.renderer.addHitEffect(input.direction, judgment.grade, currentTime);
-
-          // Record timing for per-direction stats (skip misses)
           if (judgment.grade !== 'miss') {
             this.renderer.recordTiming(input.direction, judgment.timingDiff);
           }
 
-          // Emit events
           this.emit({ type: 'judgment', data: judgment });
-
           if (prevCombo > 0 && this.scoreState.combo === 0) {
             this.emit({ type: 'combo-break' });
           }
@@ -470,18 +471,9 @@ export class GameController {
 
           this.state.judgments.push(judgment);
 
-          // Update score
           this.scoreState = applyJudgment(this.scoreState, judgment);
-          this.state.combo = this.scoreState.combo;
-          this.state.maxCombo = this.scoreState.maxCombo;
-
-          // Trigger visual feedback
-          this.renderer.triggerReceptorGlow(note.direction, currentTime);
-          this.renderer.triggerBackgroundFlash(note.direction, currentTime);
-          this.renderer.setJudgment(judgment.grade, currentTime, judgment.timingDiff);
-          this.renderer.addHitEffect(note.direction, judgment.grade, currentTime);
-
-          // Emit events
+          this.syncStateFromScore();
+          this.applyJudgmentFeedback(note.direction, judgment.grade, currentTime, judgment.timingDiff);
           this.emit({ type: 'judgment', data: judgment });
         }
         continue;
@@ -495,34 +487,22 @@ export class GameController {
 
       // For tap notes
       if (note.type !== 'hold') {
-        // Auto-hit notes that are within 5ms of current time (nearly perfect)
         const timeDiff = currentTime - note.time;
         if (timeDiff >= -5 && timeDiff <= 20) {
-          // Create a "marvelous" judgment with tiny timing diff
           const judgment = {
             noteId: note.id,
-            timingDiff: Math.random() * 10 - 5, // Slight variation for realism
+            timingDiff: Math.random() * 10 - 5,
             grade: 'marvelous' as const,
             time: currentTime,
           };
 
           note.judged = true;
           note.judgment = judgment;
-
           this.state.judgments.push(judgment);
 
-          // Update score
           this.scoreState = applyJudgment(this.scoreState, judgment);
-          this.state.combo = this.scoreState.combo;
-          this.state.maxCombo = this.scoreState.maxCombo;
-
-          // Trigger visual feedback
-          this.renderer.triggerReceptorGlow(note.direction, currentTime);
-          this.renderer.triggerBackgroundFlash(note.direction, currentTime);
-          this.renderer.setJudgment(judgment.grade, currentTime, judgment.timingDiff);
-          this.renderer.addHitEffect(note.direction, judgment.grade, currentTime);
-
-          // Emit events
+          this.syncStateFromScore();
+          this.applyJudgmentFeedback(note.direction, judgment.grade, currentTime, judgment.timingDiff);
           this.emit({ type: 'judgment', data: judgment });
         }
       }
@@ -559,17 +539,11 @@ export class GameController {
         note.judgment = judgment;
         this.state.judgments.push(judgment);
 
-        // Update score
         const prevCombo = this.scoreState.combo;
         this.scoreState = applyJudgment(this.scoreState, judgment);
+        this.syncStateFromScore();
 
-        this.state.combo = this.scoreState.combo;
-        this.state.maxCombo = this.scoreState.maxCombo;
-
-        // Visual feedback
         this.renderer.setJudgment('miss', currentTime);
-
-        // Emit events
         this.emit({ type: 'judgment', data: judgment });
 
         if (prevCombo > 0) {
@@ -624,17 +598,11 @@ export class GameController {
 
             this.state.judgments.push(judgment);
 
-            // Update score
             const prevCombo = this.scoreState.combo;
             this.scoreState = applyJudgment(this.scoreState, judgment);
+            this.syncStateFromScore();
 
-            this.state.combo = this.scoreState.combo;
-            this.state.maxCombo = this.scoreState.maxCombo;
-
-            // Visual feedback
             this.renderer.setJudgment('boo', currentTime);
-
-            // Emit events
             this.emit({ type: 'judgment', data: judgment });
 
             if (prevCombo > 0) {
@@ -648,18 +616,15 @@ export class GameController {
 
             const judgment = {
               noteId: note.id,
-              timingDiff: -timeUntilEnd, // Negative = early
+              timingDiff: -timeUntilEnd,
               grade: 'perfect' as const,
               time: currentTime,
             };
 
             this.state.judgments.push(judgment);
             this.scoreState = applyJudgment(this.scoreState, judgment);
-            this.state.combo = this.scoreState.combo;
-            this.state.maxCombo = this.scoreState.maxCombo;
-
-            this.renderer.setJudgment('perfect', currentTime, -timeUntilEnd);
-            this.renderer.addHitEffect(note.direction, 'perfect', currentTime);
+            this.syncStateFromScore();
+            this.applyJudgmentFeedback(note.direction, 'perfect', currentTime, -timeUntilEnd);
           }
         }
 
@@ -669,25 +634,17 @@ export class GameController {
           note.holdState.progress = 1;
           note.judged = true;
 
-          // Award OK judgment for completing the hold
           const judgment = {
             noteId: note.id,
             timingDiff: 0,
-            grade: 'perfect' as const, // Completing a hold gives perfect
+            grade: 'perfect' as const,
             time: currentTime,
           };
 
           this.state.judgments.push(judgment);
-
-          // Update score
           this.scoreState = applyJudgment(this.scoreState, judgment);
-
-          this.state.combo = this.scoreState.combo;
-          this.state.maxCombo = this.scoreState.maxCombo;
-
-          // Visual feedback
-          this.renderer.setJudgment('perfect', currentTime, 0);
-          this.renderer.addHitEffect(note.direction, 'perfect', currentTime);
+          this.syncStateFromScore();
+          this.applyJudgmentFeedback(note.direction, 'perfect', currentTime, 0);
         }
       }
     }
