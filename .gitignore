@@ -29,3 +29,7 @@ npm-debug.log*
 
 # TypeScript cache
 *.tsbuildinfo
+
+# Songs (local symlinks, generated manifest)
+public/songs/*
+!public/songs/.gitkeep
