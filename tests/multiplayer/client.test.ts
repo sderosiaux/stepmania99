@@ -5,29 +5,54 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { MultiplayerClient, checkServerHealth } from '../../src/multiplayer/client';
 
-// Mock WebSocket
+// Mock WebSocket with addEventListener support
 class MockWebSocket {
   static OPEN = 1;
   static CLOSED = 3;
 
   readyState = MockWebSocket.OPEN;
-  onopen: (() => void) | null = null;
-  onclose: (() => void) | null = null;
-  onerror: ((error: Error) => void) | null = null;
-  onmessage: ((event: { data: string }) => void) | null = null;
+  private eventListeners: Map<string, Set<Function>> = new Map();
 
   constructor(public url: string) {
     // Simulate async connection
     setTimeout(() => {
-      if (this.onopen) this.onopen();
+      this.dispatchEvent('open');
     }, 0);
+  }
+
+  addEventListener(event: string, handler: Function) {
+    if (!this.eventListeners.has(event)) {
+      this.eventListeners.set(event, new Set());
+    }
+    this.eventListeners.get(event)!.add(handler);
+  }
+
+  removeEventListener(event: string, handler: Function) {
+    this.eventListeners.get(event)?.delete(handler);
+  }
+
+  private dispatchEvent(event: string, data?: unknown) {
+    const handlers = this.eventListeners.get(event);
+    if (handlers) {
+      handlers.forEach(handler => handler(data));
+    }
   }
 
   send = vi.fn();
   close = vi.fn(() => {
     this.readyState = MockWebSocket.CLOSED;
-    if (this.onclose) this.onclose();
+    this.dispatchEvent('close');
   });
+
+  // Helper to simulate receiving a message
+  simulateMessage(data: string) {
+    this.dispatchEvent('message', { data });
+  }
+
+  // Helper to simulate an error
+  simulateError(error: Error) {
+    this.dispatchEvent('error', error);
+  }
 }
 
 // Mock global WebSocket

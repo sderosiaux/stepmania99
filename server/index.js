@@ -7,160 +7,72 @@
 
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer } from 'http';
-import { randomBytes } from 'crypto';
 
-// ============================================================================
-// Configuration
-// ============================================================================
+// Import configuration
+import {
+  PORT,
+  MAX_PLAYERS_PER_ROOM,
+  MAX_TOTAL_ROOMS,
+  ROOM_EXPIRY_MS,
+  ROOM_CLEANUP_INTERVAL,
+  HEARTBEAT_INTERVAL,
+  COUNTDOWN_DURATION,
+  ALLOWED_ORIGINS,
+  ATTACK_COMBO_COST,
+} from './config.js';
 
-const PORT = process.env.PORT || 3001;
-const MAX_PLAYERS_PER_ROOM = 8;
-const ROOM_CODE_LENGTH = 6;
-const HEARTBEAT_INTERVAL = 30000; // 30 seconds
-const COUNTDOWN_DURATION = 5000; // 5 seconds before game starts
+// Import validation functions
+import {
+  safeJsonParse,
+  validatePlayerName,
+  validateRoomCode,
+  validateNavigation,
+  validatePlayerState,
+  validateAttackData,
+} from './validation.js';
 
-// ============================================================================
-// State Management
-// ============================================================================
+// Import rate limiting
+import {
+  globalRateLimiter,
+  checkRateLimit,
+  cleanupRateLimiter,
+} from './rate-limiter.js';
 
-/** @type {Map<string, Room>} */
-const rooms = new Map();
+// Import anti-cheat system
+import {
+  initPlayerTracking,
+  cleanupPlayerTracking,
+  checkSequence,
+  validatePlayerStateUpdate,
+  updateTracking,
+  correctInvalidValues,
+  validateFinalScore,
+} from './anti-cheat.js';
 
-/** @type {Map<WebSocket, PlayerConnection>} */
-const connections = new Map();
+// Import utilities
+import {
+  generateRoomCode,
+  generatePlayerId,
+  generateAttackId,
+  send,
+  broadcast,
+  getRoomState,
+} from './utils.js';
 
-/**
- * @typedef {Object} PlayerConnection
- * @property {string} id
- * @property {string} name
- * @property {string|null} roomCode
- * @property {boolean} isAlive
- */
-
-/**
- * @typedef {Object} Player
- * @property {string} id
- * @property {string} name
- * @property {boolean} isHost
- * @property {boolean} isReady
- * @property {number} health
- * @property {number} combo
- * @property {number} score
- * @property {boolean} isAlive
- * @property {number|undefined} placement
- * @property {WebSocket} ws
- */
-
-/**
- * @typedef {Object} Room
- * @property {string} code
- * @property {Map<string, Player>} players
- * @property {'waiting'|'countdown'|'playing'|'results'} state
- * @property {string|undefined} songId
- * @property {string|undefined} difficulty
- * @property {number|undefined} gameStartTime
- * @property {number} maxPlayers
- * @property {number} eliminationOrder
- */
-
-// ============================================================================
-// Utility Functions
-// ============================================================================
-
-/**
- * Generate a random room code
- * @returns {string}
- */
-function generateRoomCode() {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Removed ambiguous chars
-  let code = '';
-  const bytes = randomBytes(ROOM_CODE_LENGTH);
-  for (let i = 0; i < ROOM_CODE_LENGTH; i++) {
-    code += chars[bytes[i] % chars.length];
-  }
-  return code;
-}
-
-/**
- * Generate a unique player ID
- * @returns {string}
- */
-function generatePlayerId() {
-  return randomBytes(8).toString('hex');
-}
-
-/**
- * Generate a unique attack ID
- * @returns {string}
- */
-function generateAttackId() {
-  return randomBytes(4).toString('hex');
-}
-
-/**
- * Send a message to a WebSocket client
- * @param {WebSocket} ws
- * @param {Object} message
- */
-function send(ws, message) {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(message));
-  }
-}
-
-/**
- * Broadcast a message to all players in a room
- * @param {Room} room
- * @param {Object} message
- * @param {string|null} excludePlayerId
- */
-function broadcast(room, message, excludePlayerId = null) {
-  for (const player of room.players.values()) {
-    if (player.id !== excludePlayerId) {
-      send(player.ws, message);
-    }
-  }
-}
-
-/**
- * Get room state without WebSocket references (for sending to clients)
- * @param {Room} room
- * @returns {Object}
- */
-function getRoomState(room) {
-  return {
-    code: room.code,
-    players: Array.from(room.players.values()).map(p => ({
-      id: p.id,
-      name: p.name,
-      isHost: p.isHost,
-      isReady: p.isReady,
-      health: p.health,
-      combo: p.combo,
-      score: p.score,
-      isAlive: p.isAlive,
-      placement: p.placement,
-    })),
-    state: room.state,
-    songId: room.songId,
-    difficulty: room.difficulty,
-    gameStartTime: room.gameStartTime,
-    maxPlayers: room.maxPlayers,
-  };
-}
-
-/**
- * Count alive players in a room
- * @param {Room} room
- * @returns {number}
- */
-function countAlivePlayers(room) {
-  let count = 0;
-  for (const player of room.players.values()) {
-    if (player.isAlive) count++;
-  }
-  return count;
-}
+// Import state management
+import {
+  rooms,
+  connections,
+  getRoom,
+  getConnection,
+  addRoom,
+  removeRoom,
+  addConnection,
+  removeConnection,
+  getRoomCount,
+  getConnectionCount,
+  getAllRooms,
+} from './state.js';
 
 // ============================================================================
 // Room Management
@@ -172,15 +84,18 @@ function countAlivePlayers(room) {
  * @param {string} playerName
  */
 function createRoom(ws, playerName) {
+  if (getRoomCount() >= MAX_TOTAL_ROOMS) {
+    send(ws, { type: 'error', message: 'Server is at capacity. Please try again later.' });
+    return;
+  }
+
   const playerId = generatePlayerId();
   let roomCode;
 
-  // Ensure unique room code
   do {
     roomCode = generateRoomCode();
-  } while (rooms.has(roomCode));
+  } while (getRoom(roomCode));
 
-  /** @type {Player} */
   const player = {
     id: playerId,
     name: playerName,
@@ -193,17 +108,19 @@ function createRoom(ws, playerName) {
     ws,
   };
 
-  /** @type {Room} */
+  const now = Date.now();
   const room = {
     code: roomCode,
     players: new Map([[playerId, player]]),
     state: 'waiting',
     maxPlayers: MAX_PLAYERS_PER_ROOM,
     eliminationOrder: 0,
+    createdAt: now,
+    lastActivity: now,
   };
 
-  rooms.set(roomCode, room);
-  connections.set(ws, { id: playerId, name: playerName, roomCode, isAlive: true });
+  addRoom(room);
+  addConnection(ws, { id: playerId, name: playerName, roomCode, isAlive: true });
 
   send(ws, {
     type: 'room-created',
@@ -221,7 +138,7 @@ function createRoom(ws, playerName) {
  * @param {string} playerName
  */
 function joinRoom(ws, roomCode, playerName) {
-  const room = rooms.get(roomCode.toUpperCase());
+  const room = getRoom(roomCode.toUpperCase());
 
   if (!room) {
     send(ws, { type: 'error', message: 'Room not found' });
@@ -238,9 +155,17 @@ function joinRoom(ws, roomCode, playerName) {
     return;
   }
 
+  // Check for duplicate player name
+  const lowerName = playerName.toLowerCase();
+  for (const existingPlayer of room.players.values()) {
+    if (existingPlayer.name.toLowerCase() === lowerName) {
+      send(ws, { type: 'error', message: 'A player with this name is already in the room' });
+      return;
+    }
+  }
+
   const playerId = generatePlayerId();
 
-  /** @type {Player} */
   const player = {
     id: playerId,
     name: playerName,
@@ -254,9 +179,9 @@ function joinRoom(ws, roomCode, playerName) {
   };
 
   room.players.set(playerId, player);
-  connections.set(ws, { id: playerId, name: playerName, roomCode: room.code, isAlive: true });
+  room.lastActivity = Date.now();
+  addConnection(ws, { id: playerId, name: playerName, roomCode: room.code, isAlive: true });
 
-  // Notify existing players
   broadcast(room, {
     type: 'player-joined',
     player: {
@@ -271,11 +196,11 @@ function joinRoom(ws, roomCode, playerName) {
     },
   }, playerId);
 
-  // Send room state to new player
   send(ws, {
     type: 'room-joined',
     room: getRoomState(room),
     playerId,
+    hostNavigation: room.hostNavigation,
   });
 
   console.log(`${playerName} (${playerId}) joined room ${roomCode}`);
@@ -286,10 +211,10 @@ function joinRoom(ws, roomCode, playerName) {
  * @param {WebSocket} ws
  */
 function leaveRoom(ws) {
-  const conn = connections.get(ws);
+  const conn = getConnection(ws);
   if (!conn || !conn.roomCode) return;
 
-  const room = rooms.get(conn.roomCode);
+  const room = getRoom(conn.roomCode);
   if (!room) return;
 
   const player = room.players.get(conn.id);
@@ -300,14 +225,12 @@ function leaveRoom(ws) {
 
   console.log(`${conn.name} (${conn.id}) left room ${room.code}`);
 
-  // If room is empty, delete it
   if (room.players.size === 0) {
-    rooms.delete(room.code);
+    removeRoom(room.code);
     console.log(`Room ${room.code} deleted (empty)`);
     return;
   }
 
-  // If host left, assign new host
   let newHostId = null;
   if (player.isHost) {
     const newHost = room.players.values().next().value;
@@ -318,14 +241,12 @@ function leaveRoom(ws) {
     }
   }
 
-  // Notify remaining players
   broadcast(room, {
     type: 'player-left',
     playerId: conn.id,
     newHostId,
   });
 
-  // If game is playing and player was alive, check for game end
   if (room.state === 'playing' && player.isAlive) {
     checkGameEnd(room);
   }
@@ -340,10 +261,10 @@ function leaveRoom(ws) {
  * @param {WebSocket} ws
  */
 function toggleReady(ws) {
-  const conn = connections.get(ws);
+  const conn = getConnection(ws);
   if (!conn || !conn.roomCode) return;
 
-  const room = rooms.get(conn.roomCode);
+  const room = getRoom(conn.roomCode);
   if (!room || room.state !== 'waiting') return;
 
   const player = room.players.get(conn.id);
@@ -364,10 +285,10 @@ function toggleReady(ws) {
  * @param {string} difficulty
  */
 function selectSong(ws, songId, difficulty) {
-  const conn = connections.get(ws);
+  const conn = getConnection(ws);
   if (!conn || !conn.roomCode) return;
 
-  const room = rooms.get(conn.roomCode);
+  const room = getRoom(conn.roomCode);
   if (!room || room.state !== 'waiting') return;
 
   const player = room.players.get(conn.id);
@@ -390,10 +311,10 @@ function selectSong(ws, songId, difficulty) {
  * @param {WebSocket} ws
  */
 function startGame(ws) {
-  const conn = connections.get(ws);
+  const conn = getConnection(ws);
   if (!conn || !conn.roomCode) return;
 
-  const room = rooms.get(conn.roomCode);
+  const room = getRoom(conn.roomCode);
   if (!room || room.state !== 'waiting') return;
 
   const player = room.players.get(conn.id);
@@ -407,13 +328,11 @@ function startGame(ws) {
     return;
   }
 
-  // Check if at least 2 players
   if (room.players.size < 2) {
     send(ws, { type: 'error', message: 'Need at least 2 players to start' });
     return;
   }
 
-  // Check if all players are ready (except host)
   for (const p of room.players.values()) {
     if (!p.isHost && !p.isReady) {
       send(ws, { type: 'error', message: 'Not all players are ready' });
@@ -421,17 +340,17 @@ function startGame(ws) {
     }
   }
 
-  // Start countdown
   room.state = 'countdown';
   room.eliminationOrder = room.players.size;
+  room.lastActivity = Date.now();
 
-  // Reset all players
   for (const p of room.players.values()) {
     p.health = 100;
     p.combo = 0;
     p.score = 0;
     p.isAlive = true;
     p.placement = undefined;
+    initPlayerTracking(p.id);
   }
 
   const startTime = Date.now() + COUNTDOWN_DURATION;
@@ -444,7 +363,6 @@ function startGame(ws) {
 
   console.log(`Game starting in room ${room.code} at ${startTime}`);
 
-  // After countdown, start game
   setTimeout(() => {
     if (room.state === 'countdown') {
       room.state = 'playing';
@@ -460,22 +378,38 @@ function startGame(ws) {
  * @param {number} health
  * @param {number} combo
  * @param {number} score
+ * @param {number} seq
  */
-function updatePlayerState(ws, health, combo, score) {
-  const conn = connections.get(ws);
+function updatePlayerState(ws, health, combo, score, seq = 0) {
+  const conn = getConnection(ws);
   if (!conn || !conn.roomCode) return;
 
-  const room = rooms.get(conn.roomCode);
+  const room = getRoom(conn.roomCode);
   if (!room || room.state !== 'playing') return;
 
   const player = room.players.get(conn.id);
   if (!player || !player.isAlive) return;
 
+  // Check sequence number for deduplication
+  if (seq > 0 && !checkSequence(conn.id, seq)) {
+    return;
+  }
+
+  // Validate and correct if needed
+  const validation = validatePlayerStateUpdate(conn.id, health, combo, score);
+  if (!validation.valid) {
+    const corrected = correctInvalidValues(conn.id, health, combo, score);
+    health = corrected.health;
+    combo = corrected.combo;
+    score = corrected.score;
+  }
+
+  updateTracking(conn.id, health, combo, score);
+
   player.health = health;
   player.combo = combo;
   player.score = score;
 
-  // Broadcast to other players
   broadcast(room, {
     type: 'player-state',
     playerId: player.id,
@@ -490,10 +424,10 @@ function updatePlayerState(ws, health, combo, score) {
  * @param {WebSocket} ws
  */
 function handlePlayerDeath(ws) {
-  const conn = connections.get(ws);
+  const conn = getConnection(ws);
   if (!conn || !conn.roomCode) return;
 
-  const room = rooms.get(conn.roomCode);
+  const room = getRoom(conn.roomCode);
   if (!room || room.state !== 'playing') return;
 
   const player = room.players.get(conn.id);
@@ -520,14 +454,21 @@ function handlePlayerDeath(ws) {
  * @param {Object} attackData
  */
 function handleAttack(ws, attackData) {
-  const conn = connections.get(ws);
+  const conn = getConnection(ws);
   if (!conn || !conn.roomCode) return;
 
-  const room = rooms.get(conn.roomCode);
+  const room = getRoom(conn.roomCode);
   if (!room || room.state !== 'playing') return;
 
   const player = room.players.get(conn.id);
   if (!player || !player.isAlive) return;
+
+  const validation = validateAttackData(attackData);
+  if (!validation.valid) return;
+
+  if (player.combo < ATTACK_COMBO_COST) return;
+
+  player.combo -= ATTACK_COMBO_COST;
 
   const attack = {
     id: generateAttackId(),
@@ -537,7 +478,6 @@ function handleAttack(ws, attackData) {
     fromPlayerName: player.name,
   };
 
-  // Send attack to a random alive opponent
   const aliveOpponents = Array.from(room.players.values()).filter(
     p => p.id !== player.id && p.isAlive
   );
@@ -552,25 +492,60 @@ function handleAttack(ws, attackData) {
 }
 
 /**
+ * Handle host navigation update
+ * @param {WebSocket} ws
+ * @param {Object} navigation
+ */
+function handleHostNavigation(ws, navigation) {
+  const conn = getConnection(ws);
+  if (!conn || !conn.roomCode) {
+    send(ws, { type: 'error', message: 'Not in a room' });
+    return;
+  }
+
+  const room = getRoom(conn.roomCode);
+  if (!room) {
+    send(ws, { type: 'error', message: 'Room not found' });
+    return;
+  }
+
+  const player = room.players.get(conn.id);
+  if (!player || !player.isHost) {
+    console.warn(`Unauthorized host-navigation attempt by ${conn.name} (${conn.id}) in room ${room.code}`);
+    send(ws, { type: 'error', message: 'Only the host can control navigation' });
+    return;
+  }
+
+  room.hostNavigation = navigation;
+
+  broadcast(room, {
+    type: 'host-navigation',
+    navigation,
+  }, conn.id);
+}
+
+/**
  * Handle game finished for a player
  * @param {WebSocket} ws
  * @param {number} score
  */
 function handleGameFinished(ws, score) {
-  const conn = connections.get(ws);
+  const conn = getConnection(ws);
   if (!conn || !conn.roomCode) return;
 
-  const room = rooms.get(conn.roomCode);
+  const room = getRoom(conn.roomCode);
   if (!room || room.state !== 'playing') return;
 
   const player = room.players.get(conn.id);
   if (!player) return;
 
+  score = validateFinalScore(conn.id, score);
+  cleanupPlayerTracking(conn.id);
+
   player.score = score;
 
-  // If player is still alive when song ends, they survived
   if (player.isAlive) {
-    player.placement = 1; // Will be adjusted below
+    player.placement = 1;
   }
 
   checkGameEnd(room);
@@ -578,12 +553,11 @@ function handleGameFinished(ws, score) {
 
 /**
  * Check if game should end
- * @param {Room} room
+ * @param {Object} room
  */
 function checkGameEnd(room) {
   const alivePlayers = Array.from(room.players.values()).filter(p => p.isAlive);
 
-  // Game ends when 0 or 1 players remain
   if (alivePlayers.length <= 1) {
     endGame(room);
   }
@@ -591,15 +565,13 @@ function checkGameEnd(room) {
 
 /**
  * End the game and calculate final placements
- * @param {Room} room
+ * @param {Object} room
  */
 function endGame(room) {
   room.state = 'results';
 
-  // Calculate final placements based on survival and score
   const players = Array.from(room.players.values());
 
-  // Sort by: alive first, then by score (descending)
   players.sort((a, b) => {
     if (a.isAlive !== b.isAlive) {
       return a.isAlive ? -1 : 1;
@@ -607,7 +579,6 @@ function endGame(room) {
     return b.score - a.score;
   });
 
-  // Assign final placements for survivors
   let placement = 1;
   for (const player of players) {
     if (player.isAlive) {
@@ -628,7 +599,6 @@ function endGame(room) {
 
   console.log(`Game ended in room ${room.code}`, finalPlacements);
 
-  // Reset room to waiting state after a delay
   setTimeout(() => {
     if (room.state === 'results') {
       room.state = 'waiting';
@@ -636,7 +606,6 @@ function endGame(room) {
       room.difficulty = undefined;
       room.gameStartTime = undefined;
 
-      // Reset all players
       for (const player of room.players.values()) {
         player.isReady = false;
         player.health = 100;
@@ -651,7 +620,7 @@ function endGame(room) {
         room: getRoomState(room),
       });
     }
-  }, 10000); // 10 second delay before resetting
+  }, 10000);
 }
 
 // ============================================================================
@@ -659,32 +628,42 @@ function endGame(room) {
 // ============================================================================
 
 const server = createServer((req, res) => {
-  // Health check endpoint
-  if (req.url === '/health') {
-    res.writeHead(200, {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': '*',
-    });
-    res.end(JSON.stringify({
-      status: 'ok',
-      rooms: rooms.size,
-      connections: connections.size,
-    }));
-    return;
-  }
+  const origin = req.headers.origin;
+  const isAllowedOrigin = origin && ALLOWED_ORIGINS.has(origin);
 
-  // CORS preflight
+  const corsHeaders = {
+    'Access-Control-Allow-Origin': isAllowedOrigin ? origin : '',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Credentials': 'true',
+    'Access-Control-Allow-Private-Network': 'true',
+  };
+
   if (req.method === 'OPTIONS') {
-    res.writeHead(200, {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-    });
+    if (!isAllowedOrigin) {
+      res.writeHead(403);
+      res.end('CORS origin not allowed');
+      return;
+    }
+    res.writeHead(204, corsHeaders);
     res.end();
     return;
   }
 
-  res.writeHead(404);
+  if (req.url === '/health') {
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      ...corsHeaders,
+    });
+    res.end(JSON.stringify({
+      status: 'ok',
+      rooms: getRoomCount(),
+      connections: getConnectionCount(),
+    }));
+    return;
+  }
+
+  res.writeHead(404, corsHeaders);
   res.end('Not Found');
 });
 
@@ -701,7 +680,7 @@ wss.on('connection', (ws) => {
 
   ws.on('message', (data) => {
     try {
-      const message = JSON.parse(data.toString());
+      const message = safeJsonParse(data.toString());
       handleMessage(ws, message);
     } catch (err) {
       console.error('Invalid message:', err);
@@ -712,7 +691,8 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     console.log('Connection closed');
     leaveRoom(ws);
-    connections.delete(ws);
+    removeConnection(ws);
+    cleanupRateLimiter(ws);
   });
 
   ws.on('error', (err) => {
@@ -726,14 +706,44 @@ wss.on('connection', (ws) => {
  * @param {Object} message
  */
 function handleMessage(ws, message) {
-  switch (message.type) {
-    case 'create-room':
-      createRoom(ws, message.playerName);
-      break;
+  if (!globalRateLimiter.check()) {
+    return;
+  }
 
-    case 'join-room':
-      joinRoom(ws, message.roomCode, message.playerName);
+  if (!checkRateLimit(ws, 'global')) {
+    send(ws, { type: 'error', message: 'Rate limit exceeded' });
+    return;
+  }
+
+  switch (message.type) {
+    case 'create-room': {
+      if (!checkRateLimit(ws, 'create-room')) {
+        send(ws, { type: 'error', message: 'Please wait before creating another room' });
+        return;
+      }
+      const nameResult = validatePlayerName(message.playerName);
+      if (!nameResult.valid) {
+        send(ws, { type: 'error', message: nameResult.error });
+        return;
+      }
+      createRoom(ws, nameResult.value);
       break;
+    }
+
+    case 'join-room': {
+      const nameResult = validatePlayerName(message.playerName);
+      if (!nameResult.valid) {
+        send(ws, { type: 'error', message: nameResult.error });
+        return;
+      }
+      const codeResult = validateRoomCode(message.roomCode);
+      if (!codeResult.valid) {
+        send(ws, { type: 'error', message: codeResult.error });
+        return;
+      }
+      joinRoom(ws, codeResult.value, nameResult.value);
+      break;
+    }
 
     case 'leave-room':
       leaveRoom(ws);
@@ -751,21 +761,47 @@ function handleMessage(ws, message) {
       startGame(ws);
       break;
 
-    case 'player-update':
-      updatePlayerState(ws, message.health, message.combo, message.score);
+    case 'player-update': {
+      if (!checkRateLimit(ws, 'player-update')) {
+        return;
+      }
+      const stateResult = validatePlayerState(message.health, message.combo, message.score);
+      if (!stateResult.valid) {
+        return;
+      }
+      const seq = typeof message.seq === 'number' ? message.seq : 0;
+      updatePlayerState(ws, message.health, message.combo, message.score, seq);
       break;
+    }
 
     case 'player-died':
       handlePlayerDeath(ws);
       break;
 
-    case 'send-attack':
+    case 'send-attack': {
+      if (!checkRateLimit(ws, 'send-attack')) {
+        return;
+      }
       handleAttack(ws, message.attack);
       break;
+    }
 
     case 'game-finished':
       handleGameFinished(ws, message.score);
       break;
+
+    case 'host-navigation': {
+      if (!checkRateLimit(ws, 'host-navigation')) {
+        return;
+      }
+      const navResult = validateNavigation(message.navigation);
+      if (!navResult.valid) {
+        send(ws, { type: 'error', message: navResult.error });
+        return;
+      }
+      handleHostNavigation(ws, navResult.value);
+      break;
+    }
 
     case 'ping':
       send(ws, { type: 'pong' });
@@ -781,7 +817,7 @@ const heartbeat = setInterval(() => {
   wss.clients.forEach((ws) => {
     if (ws.isAlive === false) {
       leaveRoom(ws);
-      connections.delete(ws);
+      removeConnection(ws);
       return ws.terminate();
     }
 
@@ -790,8 +826,30 @@ const heartbeat = setInterval(() => {
   });
 }, HEARTBEAT_INTERVAL);
 
+// Room expiry cleanup task
+const roomCleanup = setInterval(() => {
+  const now = Date.now();
+  for (const [roomCode, room] of getAllRooms()) {
+    if (room.players.size === 0) {
+      removeRoom(roomCode);
+      console.log(`Room ${roomCode} deleted (empty)`);
+      continue;
+    }
+
+    const lastActivity = room.lastActivity || room.createdAt || now;
+    const inactiveTime = now - lastActivity;
+
+    if (inactiveTime > ROOM_EXPIRY_MS) {
+      broadcast(room, { type: 'error', message: 'Room expired due to inactivity' });
+      removeRoom(roomCode);
+      console.log(`Room ${roomCode} expired (inactive for ${Math.round(inactiveTime / 60000)} minutes)`);
+    }
+  }
+}, ROOM_CLEANUP_INTERVAL);
+
 wss.on('close', () => {
   clearInterval(heartbeat);
+  clearInterval(roomCleanup);
 });
 
 // ============================================================================
@@ -804,11 +862,63 @@ server.listen(PORT, () => {
 });
 
 // Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('Shutting down...');
+let isShuttingDown = false;
+
+async function gracefulShutdown(signal) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+
+  console.log(`\n${signal} received. Starting graceful shutdown...`);
+
+  clearInterval(heartbeat);
+  clearInterval(roomCleanup);
+
+  const shutdownMessage = { type: 'server-shutdown', message: 'Server is shutting down', reconnectIn: 30 };
+  wss.clients.forEach((ws) => {
+    try {
+      send(ws, shutdownMessage);
+    } catch {
+      // Ignore errors
+    }
+  });
+
+  await new Promise(resolve => setTimeout(resolve, 1000));
+
+  wss.clients.forEach((ws) => {
+    try {
+      ws.close(1001, 'Server shutting down');
+    } catch {
+      ws.terminate();
+    }
+  });
+
+  const closeTimeout = setTimeout(() => {
+    console.log('Force closing remaining connections...');
+    wss.clients.forEach((ws) => ws.terminate());
+  }, 5000);
+
   wss.close(() => {
+    clearTimeout(closeTimeout);
     server.close(() => {
+      console.log('Graceful shutdown complete.');
       process.exit(0);
     });
   });
+
+  setTimeout(() => {
+    console.error('Forced exit after timeout');
+    process.exit(1);
+  }, 10000);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+process.on('uncaughtException', (err) => {
+  console.error('UNCAUGHT EXCEPTION:', err);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('UNHANDLED REJECTION at:', promise, 'reason:', reason);
 });

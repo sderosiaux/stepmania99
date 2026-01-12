@@ -11,6 +11,7 @@ import type {
   PlayerId,
   RoomCode,
   ConnectionState,
+  HostNavigationState,
 } from '../types/multiplayer';
 import type { Difficulty } from '../types';
 
@@ -31,6 +32,7 @@ export type MultiplayerEventType =
   | 'player-eliminated'
   | 'attack-received'
   | 'game-ended'
+  | 'host-navigation'
   | 'error';
 
 export interface MultiplayerEvent {
@@ -66,6 +68,12 @@ export class MultiplayerClient {
   private reconnectAttempts = 0;
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
+
+  // Bound event handlers for proper cleanup (Fix: Memory Leak)
+  private boundOnOpen: (() => void) | null = null;
+  private boundOnClose: (() => void) | null = null;
+  private boundOnError: ((event: Event) => void) | null = null;
+  private boundOnMessage: ((event: MessageEvent) => void) | null = null;
 
   constructor(serverUrl?: string) {
     this.serverUrl = serverUrl || DEFAULT_SERVER_URL;
@@ -158,6 +166,30 @@ export class MultiplayerClient {
   }
 
   /**
+   * Clean up WebSocket event handlers (Fix: Memory Leak)
+   */
+  private cleanupWebSocketHandlers(): void {
+    if (this.ws) {
+      if (this.boundOnOpen) {
+        this.ws.removeEventListener('open', this.boundOnOpen);
+      }
+      if (this.boundOnClose) {
+        this.ws.removeEventListener('close', this.boundOnClose);
+      }
+      if (this.boundOnError) {
+        this.ws.removeEventListener('error', this.boundOnError);
+      }
+      if (this.boundOnMessage) {
+        this.ws.removeEventListener('message', this.boundOnMessage);
+      }
+    }
+    this.boundOnOpen = null;
+    this.boundOnClose = null;
+    this.boundOnError = null;
+    this.boundOnMessage = null;
+  }
+
+  /**
    * Connect to server
    */
   connect(): Promise<void> {
@@ -172,7 +204,8 @@ export class MultiplayerClient {
       try {
         this.ws = new WebSocket(this.serverUrl);
 
-        this.ws.onopen = () => {
+        // Create bound handlers for proper cleanup (Fix: Memory Leak)
+        this.boundOnOpen = () => {
           console.log('Connected to multiplayer server');
           this.connectionState = 'connected';
           this.reconnectAttempts = 0;
@@ -181,21 +214,26 @@ export class MultiplayerClient {
           resolve();
         };
 
-        this.ws.onclose = () => {
+        this.boundOnClose = () => {
           console.log('Disconnected from multiplayer server');
           this.handleDisconnect();
         };
 
-        this.ws.onerror = (error) => {
+        this.boundOnError = (error: Event) => {
           console.error('WebSocket error:', error);
           this.connectionState = 'error';
           this.emit({ type: 'connection-changed', data: this.connectionState });
           reject(new Error('Connection failed'));
         };
 
-        this.ws.onmessage = (event) => {
+        this.boundOnMessage = (event: MessageEvent) => {
           this.handleMessage(event.data);
         };
+
+        this.ws.addEventListener('open', this.boundOnOpen);
+        this.ws.addEventListener('close', this.boundOnClose);
+        this.ws.addEventListener('error', this.boundOnError);
+        this.ws.addEventListener('message', this.boundOnMessage);
       } catch (err) {
         this.connectionState = 'error';
         this.emit({ type: 'connection-changed', data: this.connectionState });
@@ -212,7 +250,8 @@ export class MultiplayerClient {
     this.cancelReconnect();
 
     if (this.ws) {
-      this.ws.onclose = null; // Prevent reconnect on intentional disconnect
+      // Clean up event handlers before closing (Fix: Memory Leak)
+      this.cleanupWebSocketHandlers();
       this.ws.close();
       this.ws = null;
     }
@@ -228,6 +267,8 @@ export class MultiplayerClient {
    */
   private handleDisconnect(): void {
     this.stopPing();
+    // Clean up handlers before nulling ws (Fix: Memory Leak)
+    this.cleanupWebSocketHandlers();
     this.ws = null;
     this.connectionState = 'disconnected';
     this.emit({ type: 'connection-changed', data: this.connectionState });
@@ -403,6 +444,10 @@ export class MultiplayerClient {
           this.emit({ type: 'game-ended', data: message.finalPlacements });
           break;
 
+        case 'host-navigation':
+          this.emit({ type: 'host-navigation', data: message.navigation });
+          break;
+
         case 'error':
           this.emit({ type: 'error', data: message.message });
           break;
@@ -467,6 +512,14 @@ export class MultiplayerClient {
    */
   startGame(): void {
     this.send({ type: 'start-game' });
+  }
+
+  /**
+   * Send host navigation state to sync with guests (host only)
+   */
+  sendHostNavigation(navigation: HostNavigationState): void {
+    if (!this.isHost()) return;
+    this.send({ type: 'host-navigation', navigation });
   }
 
   // ============================================================================
