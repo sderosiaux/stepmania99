@@ -5,7 +5,6 @@ import { GameController } from './core/game';
 import { loadAllSongs } from './core/loader';
 import { SongSelectScreen, saveScore } from './ui/song-select';
 import { ResultsScreen } from './ui/results';
-import { LobbyScreen } from './ui/lobby';
 import { multiplayerClient, multiplayerGameManager } from './multiplayer';
 import type { MultiplayerEvent } from './multiplayer';
 
@@ -21,9 +20,8 @@ class App {
   private gameController: GameController | null = null;
   private songSelectScreen: SongSelectScreen | null = null;
   private resultsScreen: ResultsScreen | null = null;
-  private lobbyScreen: LobbyScreen | null = null;
 
-  private currentScreen: GameScreen | 'lobby' = 'loading';
+  private currentScreen: GameScreen = 'loading';
   private songs: Song[] = [];
   private lastPlayedSong: Song | null = null;
   private lastPlayedChart: Chart | null = null;
@@ -45,17 +43,11 @@ class App {
     this.songSelectScreen = new SongSelectScreen(this.uiContainer, {
       onSongSelect: (song, chart, settings) => this.startGame(song, chart, settings),
       onDemo: (song, chart, settings) => this.startGame(song, chart, settings, true),
-      onMultiplayer: () => this.showLobby(),
     });
 
     this.resultsScreen = new ResultsScreen(this.uiContainer, {
       onContinue: () => this.handleResultsContinue(),
       onRetry: () => this.retryLastSong(),
-    });
-
-    this.lobbyScreen = new LobbyScreen(this.uiContainer, {
-      onStartGame: (songId, difficulty) => this.startMultiplayerGame(songId, difficulty),
-      onCancel: () => this.showSongSelect(),
     });
 
     // Global keyboard handlers for pause/exit
@@ -128,30 +120,30 @@ class App {
     this.canvas.classList.add('hidden');
     this.uiContainer.classList.remove('hidden');
     this.resultsScreen?.hide();
-    this.lobbyScreen?.hide();
     this.songSelectScreen?.show(this.songs);
-  }
-
-  /**
-   * Show multiplayer lobby
-   * @param roomCode - Optional room code to pre-fill for joining
-   */
-  private showLobby(roomCode?: string): void {
-    this.currentScreen = 'lobby';
-    this.resultsScreen?.hide();
-    this.songSelectScreen?.hide();
-    this.lobbyScreen?.show(this.songs, roomCode);
   }
 
   /**
    * Handle multiplayer events
    */
   private handleMultiplayerEvent(event: MultiplayerEvent): void {
-    if (event.type === 'game-ended' && this.isMultiplayerMode) {
-      // Game ended - show results
-      const results = this.gameController?.getResults();
-      if (results) {
-        this.showResults(results);
+    switch (event.type) {
+      case 'game-started': {
+        // Game started via multiplayer - get song/difficulty from room
+        const room = multiplayerClient.getRoom();
+        if (room?.songId && room?.difficulty) {
+          this.startMultiplayerGame(room.songId, room.difficulty);
+        }
+        break;
+      }
+      case 'game-ended': {
+        if (this.isMultiplayerMode) {
+          const results = this.gameController?.getResults();
+          if (results) {
+            this.showResults(results);
+          }
+        }
+        break;
       }
     }
   }
@@ -199,7 +191,6 @@ class App {
 
     // Hide UI, show canvas
     this.songSelectScreen?.hide();
-    this.lobbyScreen?.hide();
     this.uiContainer.classList.add('hidden');
     this.canvas.classList.remove('hidden');
 
@@ -248,15 +239,10 @@ class App {
 
   /**
    * Handle continue from results screen
-   * Returns to lobby if in multiplayer mode, otherwise to song select
+   * Returns to song select (multiplayer bar will show if still in a room)
    */
   private handleResultsContinue(): void {
-    if (this.isMultiplayerMode) {
-      // Return to lobby - player stays in room
-      this.showLobby();
-    } else {
-      this.showSongSelect();
-    }
+    this.showSongSelect();
   }
 
   /**
