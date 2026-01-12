@@ -1,7 +1,10 @@
 import type { Song, Chart, Settings, SongPack, Note, NoteSkin } from '../types';
+import type { HostNavigationState, Room } from '../types/multiplayer';
 import { THEME } from '../render';
 import { DEFAULT_SETTINGS, NOTE_SKINS } from '../types';
 import { audioManager } from '../audio';
+import { multiplayerClient } from '../multiplayer';
+import type { MultiplayerEvent } from '../multiplayer';
 
 // ============================================================================
 // BPM Display Helper
@@ -221,14 +224,24 @@ export class SongSelectScreen {
   private animationStartTime: number = performance.now();
   private noteSkin: NoteSkin = DEFAULT_SETTINGS.noteSkin;
 
+  // Multiplayer state
+  private isMultiplayerMode: boolean = false;
+  private isSpectatorMode: boolean = false; // True for guests (read-only)
+  private boundMultiplayerHandler: (event: MultiplayerEvent) => void;
+  private showingMultiplayerModal: boolean = false;
+
   constructor(container: HTMLElement, callbacks: SongSelectCallbacks) {
     this.container = container;
     this.callbacks = callbacks;
     this.boundKeyHandler = this.handleKey.bind(this);
     this.boundKeyUpHandler = this.handleKeyUp.bind(this);
+    this.boundMultiplayerHandler = this.handleMultiplayerEvent.bind(this);
     this.cmod = this.loadCmod();
     this.audioOffset = this.loadAudioOffset();
     this.noteSkin = this.loadNoteSkin();
+
+    // Listen to multiplayer events
+    multiplayerClient.addEventListener(this.boundMultiplayerHandler);
   }
 
   private loadCmod(): number {
@@ -269,10 +282,388 @@ export class SongSelectScreen {
     localStorage.setItem('noteSkin', this.noteSkin);
   }
 
+  // ============================================================================
+  // Multiplayer Mode
+  // ============================================================================
+
+  /**
+   * Update multiplayer mode state
+   */
+  updateMultiplayerMode(): void {
+    const room = multiplayerClient.getRoom();
+    this.isMultiplayerMode = room !== null;
+    this.isSpectatorMode = this.isMultiplayerMode && !multiplayerClient.isHost();
+  }
+
+  /**
+   * Handle multiplayer events
+   */
+  private handleMultiplayerEvent(event: MultiplayerEvent): void {
+    switch (event.type) {
+      case 'room-created':
+      case 'room-joined':
+        this.updateMultiplayerMode();
+        this.updateMultiplayerBar();
+        // If joining as guest, sync to host's current selection
+        if (event.type === 'room-joined' && this.isSpectatorMode) {
+          const navigation = (event.data as { hostNavigation?: HostNavigationState })?.hostNavigation;
+          if (navigation) {
+            this.applyHostNavigation(navigation);
+          }
+        }
+        break;
+
+      case 'host-navigation':
+        if (this.isSpectatorMode) {
+          this.applyHostNavigation(event.data as HostNavigationState);
+        }
+        break;
+
+      case 'room-updated':
+      case 'player-joined':
+      case 'player-left':
+        this.updateMultiplayerBar();
+        break;
+
+      case 'game-starting':
+        // Countdown started - will be handled by main.ts
+        break;
+    }
+  }
+
+  /**
+   * Apply host navigation state (for spectators)
+   */
+  private applyHostNavigation(navigation: HostNavigationState): void {
+    if (!this.isSpectatorMode) return;
+
+    let needsRender = false;
+
+    if (navigation.packIndex !== this.selectedPackIndex) {
+      this.selectedPackIndex = navigation.packIndex;
+      this.selectedSongIndex = 0;
+      needsRender = true;
+    }
+
+    if (navigation.songIndex !== this.selectedSongIndex) {
+      this.selectedSongIndex = navigation.songIndex;
+      needsRender = true;
+    }
+
+    if (needsRender) {
+      this.render();
+    }
+  }
+
+  /**
+   * Get current pack
+   */
+  private getCurrentPack(): SongPack | undefined {
+    return this.packs[this.selectedPackIndex];
+  }
+
+  /**
+   * Get current song
+   */
+  private getCurrentSong(): Song | undefined {
+    return this.getCurrentPack()?.songs[this.selectedSongIndex];
+  }
+
+  /**
+   * Get current chart
+   */
+  private getCurrentChart(): Chart | undefined {
+    return this.getCurrentSong()?.charts[this.selectedDifficultyIndex];
+  }
+
+  /**
+   * Broadcast navigation to guests (host only)
+   */
+  private broadcastNavigation(): void {
+    if (!this.isMultiplayerMode || this.isSpectatorMode) return;
+
+    const currentSong = this.getCurrentSong();
+    const currentChart = this.getCurrentChart();
+
+    const navigation: HostNavigationState = {
+      packIndex: this.selectedPackIndex,
+      songIndex: this.selectedSongIndex,
+    };
+
+    if (currentSong) {
+      navigation.songId = currentSong.id;
+    }
+    if (currentChart) {
+      navigation.difficulty = currentChart.difficulty;
+    }
+
+    multiplayerClient.sendHostNavigation(navigation);
+  }
+
+  /**
+   * Render multiplayer bar HTML
+   */
+  private renderMultiplayerBar(room: Room): string {
+    const isHost = multiplayerClient.isHost();
+    const localPlayerId = multiplayerClient.getPlayerId();
+
+    // Build player list with status
+    const playersHtml = room.players.map(p => {
+      const isLocal = p.id === localPlayerId;
+      const readyClass = p.isReady ? 'ready' : '';
+      const hostIcon = p.isHost ? '👑' : '';
+      const youMarker = isLocal ? ' (you)' : '';
+      return `<span class="mp-player ${readyClass}" title="${p.name}${youMarker}">${hostIcon}${escapeHtml(p.name)}</span>`;
+    }).join('');
+
+    const readyCount = room.players.filter(p => p.isHost || p.isReady).length;
+    const allReady = readyCount === room.players.length;
+
+    // For non-host: show ready toggle
+    const localPlayer = room.players.find(p => p.id === localPlayerId);
+    const isReady = localPlayer?.isReady ?? false;
+
+    return `
+      <div class="multiplayer-bar">
+        <div class="mp-info">
+          <div class="mp-room-code">
+            <span class="mp-label">ROOM</span>
+            <span class="mp-code">${room.code}</span>
+          </div>
+          <div class="mp-player-list">
+            ${playersHtml}
+            ${room.players.length < room.maxPlayers ? `<span class="mp-player empty">+${room.maxPlayers - room.players.length} slots</span>` : ''}
+          </div>
+        </div>
+        <div class="mp-controls">
+          ${isHost ? `
+            <div class="mp-ready-status ${allReady ? 'all-ready' : ''}">
+              ${allReady ? '✓ All ready' : `${readyCount}/${room.players.length} ready`}
+            </div>
+            <button class="mp-start-btn ${allReady && room.players.length >= 2 ? '' : 'disabled'}" ${allReady && room.players.length >= 2 ? '' : 'disabled'}>
+              Start Game
+            </button>
+          ` : `
+            <button class="mp-ready-btn ${isReady ? 'ready' : ''}">
+              ${isReady ? '✓ Ready' : 'Ready Up'}
+            </button>
+          `}
+          <button class="mp-share-btn" title="Copy room URL">📋</button>
+          <button class="mp-leave-btn" title="Leave room">✕</button>
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * Update multiplayer indicator bar
+   */
+  private updateMultiplayerBar(): void {
+    const room = multiplayerClient.getRoom();
+    if (!room) return;
+    // Re-render to update player count etc
+    this.render();
+  }
+
+  /**
+   * Attach multiplayer bar event listeners
+   */
+  private attachMultiplayerBarListeners(): void {
+    const bar = this.container.querySelector('.multiplayer-bar');
+    if (!bar) return;
+
+    const room = multiplayerClient.getRoom();
+    if (!room) return;
+
+    // Share button
+    const shareBtn = bar.querySelector('.mp-share-btn');
+    shareBtn?.addEventListener('click', () => {
+      const url = new URL(window.location.href);
+      url.searchParams.set('room', room.code);
+      navigator.clipboard.writeText(url.toString());
+      if (shareBtn) shareBtn.textContent = '✓';
+      setTimeout(() => { if (shareBtn) shareBtn.textContent = '📋'; }, 1500);
+    });
+
+    // Leave button
+    const leaveBtn = bar.querySelector('.mp-leave-btn');
+    leaveBtn?.addEventListener('click', () => {
+      multiplayerClient.leaveRoom();
+      this.isMultiplayerMode = false;
+      this.isSpectatorMode = false;
+      const url = new URL(window.location.href);
+      url.searchParams.delete('room');
+      window.history.replaceState({}, '', url.toString());
+      this.render();
+    });
+
+    // Ready button (for non-host players)
+    const readyBtn = bar.querySelector('.mp-ready-btn');
+    readyBtn?.addEventListener('click', () => {
+      multiplayerClient.toggleReady();
+    });
+
+    // Start game button (for host)
+    const startBtn = bar.querySelector('.mp-start-btn');
+    startBtn?.addEventListener('click', () => {
+      // Select the current song/chart before starting
+      const currentSong = this.getCurrentSong();
+      const currentChart = this.getCurrentChart();
+      if (currentSong && currentChart) {
+        multiplayerClient.selectSong(currentSong.id, currentChart.difficulty);
+        multiplayerClient.startGame();
+      }
+    });
+  }
+
+  /**
+   * Show multiplayer modal (create/join room)
+   */
+  showMultiplayerModal(): void {
+    if (this.showingMultiplayerModal) return;
+    this.showingMultiplayerModal = true;
+
+    const modal = document.createElement('div');
+    modal.className = 'mp-modal-overlay';
+    modal.innerHTML = `
+      <div class="mp-modal">
+        <h2>Multiplayer</h2>
+
+        <div class="mp-section">
+          <h3>Create Room</h3>
+          <div class="mp-input-row">
+            <input type="text" id="mp-create-name" placeholder="Your name" maxlength="20" />
+            <button id="mp-create-btn" class="mp-btn mp-btn-primary">Create</button>
+          </div>
+        </div>
+
+        <div class="mp-divider"><span>OR</span></div>
+
+        <div class="mp-section">
+          <h3>Join Room</h3>
+          <div class="mp-input-row">
+            <input type="text" id="mp-join-name" placeholder="Your name" maxlength="20" />
+            <input type="text" id="mp-join-code" placeholder="Room code" maxlength="8" style="width: 100px; text-transform: uppercase;" />
+            <button id="mp-join-btn" class="mp-btn mp-btn-secondary">Join</button>
+          </div>
+        </div>
+
+        <div class="mp-error hidden" id="mp-error"></div>
+
+        <button id="mp-close-btn" class="mp-close">✕</button>
+      </div>
+    `;
+
+    document.body.appendChild(modal);
+
+    // Event listeners
+    const closeModal = () => {
+      modal.remove();
+      this.showingMultiplayerModal = false;
+    };
+
+    modal.querySelector('#mp-close-btn')?.addEventListener('click', closeModal);
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) closeModal();
+    });
+
+    const showError = (msg: string) => {
+      const errorEl = modal.querySelector('#mp-error');
+      if (errorEl) {
+        errorEl.textContent = msg;
+        errorEl.classList.remove('hidden');
+        setTimeout(() => errorEl.classList.add('hidden'), 3000);
+      }
+    };
+
+    // Create room
+    modal.querySelector('#mp-create-btn')?.addEventListener('click', async () => {
+      const nameInput = modal.querySelector('#mp-create-name') as HTMLInputElement;
+      const name = nameInput?.value.trim();
+      if (!name) {
+        showError('Please enter your name');
+        return;
+      }
+
+      try {
+        await multiplayerClient.connect();
+        multiplayerClient.createRoom(name);
+        // Don't close modal yet - wait for room-created event
+      } catch {
+        showError('Failed to connect to server');
+      }
+    });
+
+    // Join room
+    modal.querySelector('#mp-join-btn')?.addEventListener('click', async () => {
+      const nameInput = modal.querySelector('#mp-join-name') as HTMLInputElement;
+      const codeInput = modal.querySelector('#mp-join-code') as HTMLInputElement;
+      const name = nameInput?.value.trim();
+      const code = codeInput?.value.trim().toUpperCase();
+
+      if (!name) {
+        showError('Please enter your name');
+        return;
+      }
+      if (!code || code.length !== 8) {
+        showError('Room code must be 8 characters');
+        return;
+      }
+
+      try {
+        await multiplayerClient.connect();
+        multiplayerClient.joinRoom(code, name);
+        // Don't close modal yet - wait for room-joined event
+      } catch {
+        showError('Failed to connect to server');
+      }
+    });
+
+    // Listen for room events to close modal
+    const handleRoomEvent = (event: MultiplayerEvent) => {
+      if (event.type === 'room-created' || event.type === 'room-joined') {
+        closeModal();
+        // URL will be updated by the existing handler
+      } else if (event.type === 'error') {
+        showError(event.data as string);
+      }
+    };
+
+    multiplayerClient.addEventListener(handleRoomEvent);
+
+    // Clean up listener when modal closes
+    const originalClose = closeModal;
+    const newCloseModal = () => {
+      multiplayerClient.removeEventListener(handleRoomEvent);
+      originalClose();
+    };
+    modal.querySelector('#mp-close-btn')?.removeEventListener('click', closeModal);
+    modal.querySelector('#mp-close-btn')?.addEventListener('click', newCloseModal);
+  }
+
+  /**
+   * Join room directly (called from URL with room code)
+   */
+  async joinRoomFromUrl(roomCode: string): Promise<void> {
+    // Show a simple name input modal
+    const name = prompt('Enter your name to join the room:');
+    if (!name || !name.trim()) return;
+
+    try {
+      await multiplayerClient.connect();
+      multiplayerClient.joinRoom(roomCode, name.trim());
+    } catch {
+      alert('Failed to connect to server');
+    }
+  }
+
   show(songs: Song[]): void {
     const songsChanged = this.allSongs.length !== songs.length;
     this.allSongs = songs;
     this.applyFilter();
+
+    // Update multiplayer state
+    this.updateMultiplayerMode();
 
     // Only reset position on first show or if songs changed
     if (!this.hasBeenShown || songsChanged) {
@@ -421,6 +812,22 @@ export class SongSelectScreen {
   }
 
   private handleKey(e: KeyboardEvent): void {
+    // Spectators can't navigate (read-only mode)
+    if (this.isSpectatorMode) {
+      // Allow Escape to leave room
+      if (e.code === 'Escape') {
+        e.preventDefault();
+        multiplayerClient.leaveRoom();
+        this.isMultiplayerMode = false;
+        this.isSpectatorMode = false;
+        const url = new URL(window.location.href);
+        url.searchParams.delete('room');
+        window.history.replaceState({}, '', url.toString());
+        this.render();
+      }
+      return;
+    }
+
     const currentPack = this.packs[this.selectedPackIndex];
     const currentSong = currentPack?.songs[this.selectedSongIndex];
 
@@ -434,15 +841,18 @@ export class SongSelectScreen {
           this.selectedSongIndex = 0;
           this.selectedDifficultyIndex = 0;
           this.render();
+          this.broadcastNavigation();
         } else if (this.activeColumn === 'songs' && currentPack && currentPack.songs.length > 0) {
           this.selectedSongIndex = this.selectedSongIndex <= 0
             ? currentPack.songs.length - 1  // Wrap to end
             : this.selectedSongIndex - 1;
           this.selectedDifficultyIndex = 0;
           this.render();
+          this.broadcastNavigation();
         } else if (this.activeColumn === 'difficulties' && currentSong) {
           this.selectedDifficultyIndex = Math.max(0, this.selectedDifficultyIndex - 1);
           this.render();
+          this.broadcastNavigation();
         }
         break;
 
@@ -455,15 +865,18 @@ export class SongSelectScreen {
           this.selectedSongIndex = 0;
           this.selectedDifficultyIndex = 0;
           this.render();
+          this.broadcastNavigation();
         } else if (this.activeColumn === 'songs' && currentPack && currentPack.songs.length > 0) {
           this.selectedSongIndex = this.selectedSongIndex >= currentPack.songs.length - 1
             ? 0  // Wrap to start
             : this.selectedSongIndex + 1;
           this.selectedDifficultyIndex = 0;
           this.render();
+          this.broadcastNavigation();
         } else if (this.activeColumn === 'difficulties' && currentSong) {
           this.selectedDifficultyIndex = Math.min(currentSong.charts.length - 1, this.selectedDifficultyIndex + 1);
           this.render();
+          this.broadcastNavigation();
         }
         break;
 
@@ -496,7 +909,13 @@ export class SongSelectScreen {
         if (currentSong) {
           const chart = currentSong.charts[this.selectedDifficultyIndex];
           if (chart) {
-            this.callbacks.onSongSelect(currentSong, chart, { cmod: this.cmod, audioOffset: this.audioOffset, noteSkin: this.noteSkin });
+            // In multiplayer mode, host starts game via WebSocket
+            if (this.isMultiplayerMode) {
+              multiplayerClient.selectSong(currentSong.id, chart.difficulty);
+              multiplayerClient.startGame();
+            } else {
+              this.callbacks.onSongSelect(currentSong, chart, { cmod: this.cmod, audioOffset: this.audioOffset, noteSkin: this.noteSkin });
+            }
           }
         }
         break;
@@ -557,14 +976,20 @@ export class SongSelectScreen {
     const arcAnimationDelay = -(elapsedMs % glowDurationMs);
     const shimmerAnimationDelay = -(elapsedMs % shimmerDurationMs);
 
+    const room = multiplayerClient.getRoom();
+    const mpBarHtml = room ? this.renderMultiplayerBar(room) : '';
+
     this.container.innerHTML = `
-      <div class="song-select-4col" style="--arc-animation-delay: ${arcAnimationDelay}ms; --shimmer-animation-delay: ${shimmerAnimationDelay}ms">
+      <div class="song-select-4col ${this.isSpectatorMode ? 'spectator-mode' : ''}" style="--arc-animation-delay: ${arcAnimationDelay}ms; --shimmer-animation-delay: ${shimmerAnimationDelay}ms">
+        ${mpBarHtml}
         <div class="header">
-          <h1 class="title">SELECT SONG</h1>
+          <h1 class="title">${this.isMultiplayerMode ? 'MULTIPLAYER' : 'SELECT SONG'}</h1>
           <div class="header-actions">
-            <button id="multiplayer-btn" class="multiplayer-btn" ${this.callbacks.onMultiplayer ? '' : 'disabled'}>
-              <span class="mp-icon">⚔</span> Multiplayer
-            </button>
+            ${!this.isMultiplayerMode ? `
+              <button id="multiplayer-btn" class="multiplayer-btn" ${this.callbacks.onMultiplayer ? '' : 'disabled'}>
+                <span class="mp-icon">⚔</span> Multiplayer
+              </button>
+            ` : ''}
             <a href="https://stepmaniaonline.net/" target="_blank" rel="noopener" class="download-packs-link">
               Download Packs ↗
             </a>
@@ -1084,11 +1509,11 @@ export class SongSelectScreen {
     skinPrev?.addEventListener('click', () => cycleSkin(-1));
     skinNext?.addEventListener('click', () => cycleSkin(1));
 
-    // Multiplayer button click
+    // Multiplayer button click - open modal directly
     const mpBtn = this.container.querySelector('#multiplayer-btn');
-    if (mpBtn && this.callbacks.onMultiplayer) {
+    if (mpBtn) {
       mpBtn.addEventListener('click', () => {
-        this.callbacks.onMultiplayer?.();
+        this.showMultiplayerModal();
       });
     }
 
@@ -1101,11 +1526,21 @@ export class SongSelectScreen {
         if (currentSong) {
           const chart = currentSong.charts[this.selectedDifficultyIndex];
           if (chart) {
-            this.callbacks.onSongSelect(currentSong, chart, { cmod: this.cmod, audioOffset: this.audioOffset, noteSkin: this.noteSkin });
+            // In multiplayer mode, host starts game via WebSocket
+            if (this.isMultiplayerMode && !this.isSpectatorMode) {
+              multiplayerClient.selectSong(currentSong.id, chart.difficulty);
+              multiplayerClient.startGame();
+            } else if (!this.isMultiplayerMode) {
+              this.callbacks.onSongSelect(currentSong, chart, { cmod: this.cmod, audioOffset: this.audioOffset, noteSkin: this.noteSkin });
+            }
+            // Spectators can't start game
           }
         }
       });
     }
+
+    // Multiplayer bar listeners
+    this.attachMultiplayerBarListeners();
   }
 
   private getStyles(): string {
@@ -1119,6 +1554,178 @@ export class SongSelectScreen {
         color: ${THEME.text.primary};
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
         padding: 1.5rem;
+      }
+
+      /* Spectator mode - subtle overlay effect */
+      .song-select-4col.spectator-mode .columns {
+        pointer-events: none;
+        opacity: 0.9;
+      }
+
+      /* Multiplayer bar */
+      .multiplayer-bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        background: linear-gradient(135deg, rgba(255, 0, 170, 0.12), rgba(0, 212, 255, 0.12));
+        border: 1px solid rgba(255, 0, 170, 0.4);
+        border-radius: 8px;
+        padding: 0.6rem 1rem;
+        margin-bottom: 1rem;
+        gap: 1rem;
+      }
+
+      .mp-info {
+        display: flex;
+        align-items: center;
+        gap: 1.5rem;
+        flex: 1;
+      }
+
+      .mp-room-code {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+
+      .mp-label {
+        font-size: 0.65rem;
+        color: ${THEME.text.muted};
+        letter-spacing: 0.1em;
+      }
+
+      .mp-code {
+        font-family: 'SF Mono', Monaco, monospace;
+        font-size: 1rem;
+        font-weight: 700;
+        color: ${THEME.accent.primary};
+        letter-spacing: 0.15em;
+        background: rgba(0, 212, 255, 0.1);
+        padding: 0.25rem 0.5rem;
+        border-radius: 4px;
+      }
+
+      .mp-player-list {
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+      }
+
+      .mp-player {
+        font-size: 0.8rem;
+        padding: 0.25rem 0.6rem;
+        background: ${THEME.bg.tertiary};
+        border-radius: 4px;
+        color: ${THEME.text.secondary};
+        transition: all 0.2s;
+      }
+
+      .mp-player.ready {
+        background: rgba(0, 255, 136, 0.15);
+        color: #00ff88;
+        border: 1px solid rgba(0, 255, 136, 0.3);
+      }
+
+      .mp-player.empty {
+        color: ${THEME.text.muted};
+        font-style: italic;
+        border: 1px dashed ${THEME.bg.tertiary};
+        background: transparent;
+      }
+
+      .mp-controls {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+
+      .mp-ready-status {
+        font-size: 0.8rem;
+        color: ${THEME.text.secondary};
+        padding: 0 0.5rem;
+      }
+
+      .mp-ready-status.all-ready {
+        color: #00ff88;
+        font-weight: 600;
+      }
+
+      .mp-ready-btn {
+        padding: 0.5rem 1rem;
+        border: 1px solid ${THEME.text.secondary};
+        background: transparent;
+        color: ${THEME.text.secondary};
+        border-radius: 6px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s;
+      }
+
+      .mp-ready-btn:hover {
+        border-color: #00ff88;
+        color: #00ff88;
+      }
+
+      .mp-ready-btn.ready {
+        background: rgba(0, 255, 136, 0.15);
+        border-color: #00ff88;
+        color: #00ff88;
+      }
+
+      .mp-start-btn {
+        padding: 0.5rem 1.25rem;
+        background: linear-gradient(135deg, ${THEME.accent.secondary}, #ff4488);
+        border: none;
+        border-radius: 6px;
+        color: white;
+        font-size: 0.85rem;
+        font-weight: 700;
+        cursor: pointer;
+        transition: all 0.2s;
+      }
+
+      .mp-start-btn:hover:not(.disabled) {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 15px rgba(255, 0, 170, 0.4);
+      }
+
+      .mp-start-btn.disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+
+      .mp-share-btn, .mp-leave-btn {
+        width: 32px;
+        height: 32px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 6px;
+        border: none;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        font-size: 1rem;
+      }
+
+      .mp-share-btn {
+        background: ${THEME.bg.tertiary};
+        color: ${THEME.text.secondary};
+      }
+
+      .mp-share-btn:hover {
+        background: ${THEME.accent.primary};
+        color: ${THEME.bg.primary};
+      }
+
+      .mp-leave-btn {
+        background: transparent;
+        color: ${THEME.text.muted};
+      }
+
+      .mp-leave-btn:hover {
+        background: rgba(255, 68, 68, 0.15);
+        color: #ff4444;
       }
 
       .header {
@@ -1860,6 +2467,170 @@ export class SongSelectScreen {
 
       .demo-hint { color: ${THEME.accent.secondary}; font-weight: 600; }
       .glow-hint { color: ${THEME.accent.primary}; font-weight: 600; }
+
+      /* Multiplayer Modal */
+      .mp-modal-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.85);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 1000;
+        animation: fadeIn 0.2s ease;
+      }
+
+      @keyframes fadeIn {
+        from { opacity: 0; }
+        to { opacity: 1; }
+      }
+
+      .mp-modal {
+        background: ${THEME.bg.secondary};
+        border-radius: 16px;
+        padding: 2rem;
+        min-width: 400px;
+        max-width: 90vw;
+        position: relative;
+        border: 1px solid ${THEME.bg.tertiary};
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+        animation: slideUp 0.3s ease;
+      }
+
+      @keyframes slideUp {
+        from { transform: translateY(20px); opacity: 0; }
+        to { transform: translateY(0); opacity: 1; }
+      }
+
+      .mp-modal h2 {
+        margin: 0 0 1.5rem 0;
+        font-size: 1.5rem;
+        background: linear-gradient(135deg, ${THEME.accent.primary}, ${THEME.accent.secondary});
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        text-align: center;
+      }
+
+      .mp-section {
+        margin-bottom: 1rem;
+      }
+
+      .mp-section h3 {
+        font-size: 0.9rem;
+        color: ${THEME.text.secondary};
+        margin: 0 0 0.75rem 0;
+        font-weight: 500;
+      }
+
+      .mp-input-row {
+        display: flex;
+        gap: 0.5rem;
+      }
+
+      .mp-input-row input {
+        flex: 1;
+        padding: 0.75rem 1rem;
+        background: ${THEME.bg.tertiary};
+        border: 1px solid transparent;
+        border-radius: 8px;
+        color: ${THEME.text.primary};
+        font-size: 1rem;
+        outline: none;
+        transition: border-color 0.2s;
+      }
+
+      .mp-input-row input:focus {
+        border-color: ${THEME.accent.primary};
+      }
+
+      .mp-input-row input::placeholder {
+        color: ${THEME.text.muted};
+      }
+
+      .mp-btn {
+        padding: 0.75rem 1.25rem;
+        border: none;
+        border-radius: 8px;
+        font-size: 0.9rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s;
+        white-space: nowrap;
+      }
+
+      .mp-btn-primary {
+        background: linear-gradient(135deg, ${THEME.accent.primary}, ${THEME.accent.secondary});
+        color: white;
+      }
+
+      .mp-btn-primary:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 15px rgba(0, 212, 255, 0.3);
+      }
+
+      .mp-btn-secondary {
+        background: ${THEME.bg.tertiary};
+        color: ${THEME.text.primary};
+      }
+
+      .mp-btn-secondary:hover {
+        background: rgba(255, 255, 255, 0.1);
+      }
+
+      .mp-divider {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        color: ${THEME.text.muted};
+        margin: 1.25rem 0;
+        font-size: 0.8rem;
+      }
+
+      .mp-divider::before,
+      .mp-divider::after {
+        content: '';
+        flex: 1;
+        height: 1px;
+        background: ${THEME.bg.tertiary};
+      }
+
+      .mp-error {
+        background: rgba(255, 68, 68, 0.15);
+        color: #ff6666;
+        padding: 0.75rem 1rem;
+        border-radius: 8px;
+        font-size: 0.85rem;
+        margin-top: 1rem;
+        text-align: center;
+      }
+
+      .mp-error.hidden {
+        display: none;
+      }
+
+      .mp-close {
+        position: absolute;
+        top: 1rem;
+        right: 1rem;
+        width: 32px;
+        height: 32px;
+        border: none;
+        background: transparent;
+        color: ${THEME.text.muted};
+        font-size: 1.25rem;
+        cursor: pointer;
+        border-radius: 50%;
+        transition: all 0.2s;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .mp-close:hover {
+        background: ${THEME.bg.tertiary};
+        color: ${THEME.text.primary};
+      }
     </style>`;
   }
 }

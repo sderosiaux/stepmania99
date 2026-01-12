@@ -95,6 +95,18 @@ export const ATTACK_CONFIG = {
 // WebSocket Message Types
 // ============================================================================
 
+/** Host navigation state for syncing with guests */
+export interface HostNavigationState {
+  /** Currently selected pack index */
+  packIndex: number;
+  /** Currently selected song index within pack */
+  songIndex: number;
+  /** Selected song ID (if any) */
+  songId?: string;
+  /** Selected difficulty (if any) */
+  difficulty?: Difficulty;
+}
+
 /** Message from client to server */
 export type ClientMessage =
   | { type: 'create-room'; playerName: string }
@@ -107,12 +119,13 @@ export type ClientMessage =
   | { type: 'player-died' }
   | { type: 'send-attack'; attack: Omit<AttackArrow, 'id' | 'fromPlayerId' | 'fromPlayerName'> }
   | { type: 'game-finished'; score: number; placement: number }
+  | { type: 'host-navigation'; navigation: HostNavigationState }
   | { type: 'ping' };
 
 /** Message from server to client */
 export type ServerMessage =
   | { type: 'room-created'; room: Room; playerId: PlayerId }
-  | { type: 'room-joined'; room: Room; playerId: PlayerId }
+  | { type: 'room-joined'; room: Room; playerId: PlayerId; hostNavigation?: HostNavigationState }
   | { type: 'room-updated'; room: Room }
   | { type: 'player-joined'; player: Player }
   | { type: 'player-left'; playerId: PlayerId; newHostId?: PlayerId }
@@ -122,6 +135,7 @@ export type ServerMessage =
   | { type: 'player-eliminated'; playerId: PlayerId; placement: number }
   | { type: 'attack-received'; attack: AttackArrow }
   | { type: 'game-ended'; finalPlacements: Array<{ playerId: PlayerId; placement: number; score: number }> }
+  | { type: 'host-navigation'; navigation: HostNavigationState }
   | { type: 'error'; message: string }
   | { type: 'pong' };
 

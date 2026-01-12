@@ -49,7 +49,7 @@ class App {
     });
 
     this.resultsScreen = new ResultsScreen(this.uiContainer, {
-      onContinue: () => this.showSongSelect(),
+      onContinue: () => this.handleResultsContinue(),
       onRetry: () => this.retryLastSong(),
     });
 
@@ -82,9 +82,20 @@ class App {
       // Use only real StepMania songs
       this.songs = loadedSongs;
 
-      // Hide loading, show song select immediately
+      // Hide loading
       this.hideLoading();
+
+      // Check for room code in URL (?room=ABC123)
+      const urlParams = new URLSearchParams(window.location.search);
+      const roomCode = urlParams.get('room');
+
+      // Always show song select first
       this.showSongSelect();
+
+      // If room code in URL, prompt to join
+      if (roomCode) {
+        this.songSelectScreen?.joinRoomFromUrl(roomCode);
+      }
     } catch (error) {
       console.error('Failed to initialize:', error);
       this.showError('Failed to initialize. Please refresh the page.');
@@ -123,11 +134,13 @@ class App {
 
   /**
    * Show multiplayer lobby
+   * @param roomCode - Optional room code to pre-fill for joining
    */
-  private showLobby(): void {
+  private showLobby(roomCode?: string): void {
     this.currentScreen = 'lobby';
+    this.resultsScreen?.hide();
     this.songSelectScreen?.hide();
-    this.lobbyScreen?.show(this.songs);
+    this.lobbyScreen?.show(this.songs, roomCode);
   }
 
   /**
@@ -231,6 +244,19 @@ class App {
     this.canvas.classList.add('hidden');
     this.uiContainer.classList.remove('hidden');
     this.resultsScreen?.show(results);
+  }
+
+  /**
+   * Handle continue from results screen
+   * Returns to lobby if in multiplayer mode, otherwise to song select
+   */
+  private handleResultsContinue(): void {
+    if (this.isMultiplayerMode) {
+      // Return to lobby - player stays in room
+      this.showLobby();
+    } else {
+      this.showSongSelect();
+    }
   }
 
   /**

@@ -60,12 +60,22 @@ export class LobbyScreen {
 
   /**
    * Show lobby screen
+   * @param songs - Available songs
+   * @param roomCode - Optional room code to pre-fill for joining
    */
-  async show(songs: Song[]): Promise<void> {
+  async show(songs: Song[], roomCode?: string): Promise<void> {
     this.songs = songs;
     this.serverAvailable = await checkServerHealth();
 
     this.render();
+
+    // Pre-fill room code if provided
+    if (roomCode && this.element) {
+      const codeInput = this.element.querySelector('#room-code') as HTMLInputElement;
+      if (codeInput) {
+        codeInput.value = roomCode.toUpperCase();
+      }
+    }
   }
 
   /**
@@ -147,7 +157,8 @@ export class LobbyScreen {
             <div class="lobby-section">
               <h2>Join Room</h2>
               <div class="input-group">
-                <input type="text" id="room-code" placeholder="Room code" maxlength="6" />
+                <input type="text" id="join-player-name" placeholder="Your name" maxlength="20" />
+                <input type="text" id="room-code" placeholder="Room code" maxlength="8" />
                 <button id="join-room-btn" class="btn btn-secondary">Join Room</button>
               </div>
             </div>
@@ -640,6 +651,7 @@ export class LobbyScreen {
     const backBtn = this.element.querySelector('#back-btn');
     backBtn?.addEventListener('click', () => {
       this.disconnect();
+      this.clearRoomFromUrl();
       this.callbacks.onCancel();
     });
 
@@ -665,7 +677,7 @@ export class LobbyScreen {
     // Join room button
     const joinRoomBtn = this.element.querySelector('#join-room-btn');
     joinRoomBtn?.addEventListener('click', () => {
-      const nameInput = this.element?.querySelector('#player-name') as HTMLInputElement;
+      const nameInput = this.element?.querySelector('#join-player-name') as HTMLInputElement;
       const codeInput = this.element?.querySelector('#room-code') as HTMLInputElement;
       const name = nameInput?.value.trim();
       const code = codeInput?.value.trim().toUpperCase();
@@ -674,8 +686,8 @@ export class LobbyScreen {
         this.showError('Please enter your name');
         return;
       }
-      if (!code || code.length !== 6) {
-        this.showError('Please enter a valid 6-character room code');
+      if (!code || code.length !== 8) {
+        this.showError('Please enter a valid 8-character room code');
         return;
       }
       this.joinRoom(code, name);
@@ -685,6 +697,7 @@ export class LobbyScreen {
     const leaveRoomBtn = this.element.querySelector('#leave-room-btn');
     leaveRoomBtn?.addEventListener('click', () => {
       multiplayerClient.leaveRoom();
+      this.clearRoomFromUrl();
       this.render();
     });
 
@@ -780,6 +793,11 @@ export class LobbyScreen {
     switch (event.type) {
       case 'room-created':
       case 'room-joined':
+        // Update URL with room code for easy sharing
+        this.updateUrlWithRoom();
+        this.render();
+        break;
+
       case 'room-updated':
       case 'player-joined':
       case 'player-left':
@@ -802,6 +820,31 @@ export class LobbyScreen {
         this.showError(event.data as string);
         break;
     }
+  }
+
+  // ============================================================================
+  // URL Management
+  // ============================================================================
+
+  /**
+   * Update URL to include room code for sharing
+   */
+  private updateUrlWithRoom(): void {
+    const room = multiplayerClient.getRoom();
+    if (room?.code) {
+      const url = new URL(window.location.href);
+      url.searchParams.set('room', room.code);
+      window.history.replaceState({}, '', url.toString());
+    }
+  }
+
+  /**
+   * Clear room code from URL
+   */
+  private clearRoomFromUrl(): void {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('room');
+    window.history.replaceState({}, '', url.toString());
   }
 
   // ============================================================================
