@@ -2,9 +2,10 @@ import type { Song, Chart, Note, GameplayState, Settings, ResultsData } from '..
 import { DEFAULT_SETTINGS } from '../types';
 import { audioManager } from '../audio';
 import { inputManager } from '../input';
-import { Renderer } from '../render';
+import { Renderer, type OpponentDisplayState } from '../render';
 import { findMatchingNote, judgeNote, isNoteMissed } from './timing';
 import { createScoreState, applyJudgment, calculateFinalScore, generateResults, type ScoreState } from './score';
+import { multiplayerGameManager } from '../multiplayer/game-manager';
 
 // ============================================================================
 // Game Controller
@@ -218,12 +219,16 @@ export class GameController {
 
     // Handle pause
     if (this.state.paused) {
+      // Get opponents for multiplayer display
+      const opponents = this.getOpponentsForDisplay();
       this.renderer.renderGameplay(
         this.state,
         this.getCurrentGameTime(),
         new Set(inputManager.getHeldDirections()),
         this.settings.cmod,
-        this.scoreState?.health ?? 50
+        this.scoreState?.health ?? 50,
+        false,
+        opponents
       );
       this.frameId = requestAnimationFrame(this.loop.bind(this));
       return;
@@ -263,13 +268,15 @@ export class GameController {
     this.checkSongEnd(currentTime);
 
     // Render
+    const opponents = this.getOpponentsForDisplay();
     this.renderer.renderGameplay(
       this.state,
       currentTime,
       new Set(inputManager.getHeldDirections()),
       this.settings.cmod,
       this.scoreState?.health ?? 50,
-      this.autoplay
+      this.autoplay,
+      opponents
     );
 
     // Continue loop
@@ -840,5 +847,16 @@ export class GameController {
    */
   setSettings(settings: Partial<Settings>): void {
     this.settings = { ...this.settings, ...settings };
+  }
+
+  /**
+   * Get opponents for display in multiplayer mode
+   * Returns empty array if not in multiplayer
+   */
+  private getOpponentsForDisplay(): OpponentDisplayState[] {
+    if (!multiplayerGameManager.isMultiplayer()) {
+      return [];
+    }
+    return multiplayerGameManager.getOpponents();
   }
 }

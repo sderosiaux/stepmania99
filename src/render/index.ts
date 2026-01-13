@@ -1,6 +1,19 @@
 import type { Direction, Note, JudgmentGrade, GameplayState, NoteSkin } from '../types';
 import { DIRECTIONS } from '../types';
 
+// ============================================================================
+// Opponent Display Types
+// ============================================================================
+
+export interface OpponentDisplayState {
+  id: string;
+  name: string;
+  health: number;
+  combo: number;
+  score: number;
+  isAlive: boolean;
+}
+
 // Re-export theme for external use
 export { THEME, LAYOUT, DIRECTION_ROTATIONS } from './theme';
 import { THEME, LAYOUT, DIRECTION_ROTATIONS } from './theme';
@@ -2086,7 +2099,15 @@ export class Renderer {
   /**
    * Full render frame for gameplay
    */
-  renderGameplay(state: GameplayState, currentTime: number, heldDirections: Set<Direction>, cmod: number = 500, health: number = 50, autoplay: boolean = false): void {
+  renderGameplay(
+    state: GameplayState,
+    currentTime: number,
+    heldDirections: Set<Direction>,
+    cmod: number = 500,
+    health: number = 50,
+    autoplay: boolean = false,
+    opponents: OpponentDisplayState[] = []
+  ): void {
     this.clear(currentTime, health);
     this.drawLanes();
     this.drawReceptors(currentTime, heldDirections);
@@ -2110,6 +2131,11 @@ export class Renderer {
 
     if (autoplay) {
       this.drawAutoplayIndicator();
+    }
+
+    // Draw opponent mini-boards in multiplayer
+    if (opponents.length > 0) {
+      this.drawOpponentBoards(opponents, currentTime);
     }
 
     if (state.paused) {
@@ -2390,8 +2416,9 @@ export class Renderer {
 
   /**
    * Draw multiplayer opponents panel on the right side
+   * Shows each opponent's name, score, health bar, and combo in real-time
    */
-  drawOpponents(opponents: Array<{ id: string; name: string; health: number; combo: number; isAlive: boolean }>): void {
+  drawOpponentBoards(opponents: OpponentDisplayState[], currentTime: number): void {
     if (opponents.length === 0) return;
 
     // Position to the right of the lanes
@@ -2399,79 +2426,143 @@ export class Renderer {
     const lanesEndX = (this.width + totalLaneWidth) / 2;
     const panelX = lanesEndX + 30;
     const panelY = 100;
-    const cardWidth = 140;
-    const cardHeight = 50;
-    const cardGap = 8;
+    const cardWidth = 160;
+    const cardHeight = 70;
+    const cardGap = 10;
 
     this.ctx.save();
 
-    // Panel title
+    // Panel title with pulse effect
+    const titlePulse = 0.8 + 0.2 * Math.sin(currentTime / 500);
     this.ctx.font = 'bold 14px -apple-system, sans-serif';
-    this.ctx.fillStyle = THEME.text.secondary;
+    this.ctx.fillStyle = `rgba(150, 150, 180, ${titlePulse})`;
     this.ctx.textAlign = 'left';
     this.ctx.textBaseline = 'top';
-    this.ctx.fillText('OPPONENTS', panelX, panelY - 25);
+    this.ctx.fillText('OPPONENTS', panelX, panelY - 28);
+
+    // Sort opponents: alive first, then by score descending
+    const sortedOpponents = [...opponents].sort((a, b) => {
+      if (a.isAlive !== b.isAlive) return a.isAlive ? -1 : 1;
+      return b.score - a.score;
+    });
 
     // Draw each opponent card
-    opponents.forEach((opponent, index) => {
+    sortedOpponents.forEach((opponent, index) => {
       const y = panelY + index * (cardHeight + cardGap);
+      const pulse = opponent.isAlive ? 0.5 + 0.5 * Math.sin(currentTime / 300 + index) : 0;
 
-      // Card background
-      this.ctx.fillStyle = opponent.isAlive
-        ? 'rgba(20, 20, 30, 0.8)'
-        : 'rgba(40, 10, 10, 0.6)';
-      this.roundRect(panelX, y, cardWidth, cardHeight, 8);
+      // Card background with gradient
+      const bgGradient = this.ctx.createLinearGradient(panelX, y, panelX + cardWidth, y + cardHeight);
+      if (opponent.isAlive) {
+        bgGradient.addColorStop(0, 'rgba(25, 25, 40, 0.9)');
+        bgGradient.addColorStop(1, 'rgba(35, 35, 55, 0.9)');
+      } else {
+        bgGradient.addColorStop(0, 'rgba(40, 15, 15, 0.7)');
+        bgGradient.addColorStop(1, 'rgba(30, 10, 10, 0.7)');
+      }
+      this.ctx.fillStyle = bgGradient;
+      this.roundRect(panelX, y, cardWidth, cardHeight, 10);
       this.ctx.fill();
 
-      // Border
+      // Border with glow for high combo
+      if (opponent.combo >= 50 && opponent.isAlive) {
+        this.ctx.shadowColor = THEME.accent.warning;
+        this.ctx.shadowBlur = 8 + pulse * 4;
+      }
       this.ctx.strokeStyle = opponent.isAlive
-        ? 'rgba(100, 100, 120, 0.5)'
-        : 'rgba(100, 50, 50, 0.5)';
-      this.ctx.lineWidth = 1;
-      this.roundRect(panelX, y, cardWidth, cardHeight, 8);
+        ? opponent.combo >= 50
+          ? THEME.accent.warning
+          : 'rgba(100, 100, 140, 0.6)'
+        : 'rgba(100, 40, 40, 0.4)';
+      this.ctx.lineWidth = opponent.combo >= 50 ? 2 : 1;
+      this.roundRect(panelX, y, cardWidth, cardHeight, 10);
       this.ctx.stroke();
+      this.ctx.shadowBlur = 0;
 
-      // Name
-      this.ctx.font = 'bold 12px -apple-system, sans-serif';
+      // Name (top left)
+      this.ctx.font = 'bold 13px -apple-system, sans-serif';
       this.ctx.fillStyle = opponent.isAlive ? THEME.text.primary : THEME.text.muted;
       this.ctx.textAlign = 'left';
-      const displayName = opponent.name.length > 12 ? opponent.name.slice(0, 11) + '...' : opponent.name;
-      this.ctx.fillText(displayName, panelX + 10, y + 12);
+      this.ctx.textBaseline = 'top';
+      const displayName = opponent.name.length > 12 ? opponent.name.slice(0, 11) + '…' : opponent.name;
+      this.ctx.fillText(displayName, panelX + 12, y + 10);
+
+      // Score (top right) - prominent display
+      this.ctx.font = 'bold 14px -apple-system, sans-serif';
+      this.ctx.fillStyle = opponent.isAlive ? THEME.accent.primary : THEME.text.muted;
+      this.ctx.textAlign = 'right';
+      this.ctx.fillText(opponent.score.toLocaleString(), panelX + cardWidth - 12, y + 10);
 
       if (opponent.isAlive) {
         // Mini health bar
-        const healthBarX = panelX + 10;
-        const healthBarY = y + 28;
-        const healthBarWidth = cardWidth - 20;
-        const healthBarHeight = 8;
+        const healthBarX = panelX + 12;
+        const healthBarY = y + 32;
+        const healthBarWidth = cardWidth - 24;
+        const healthBarHeight = 10;
 
         // Background
         this.ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
-        this.roundRect(healthBarX, healthBarY, healthBarWidth, healthBarHeight, 4);
+        this.roundRect(healthBarX, healthBarY, healthBarWidth, healthBarHeight, 5);
         this.ctx.fill();
 
-        // Health fill
+        // Health fill with gradient
         const healthPercent = Math.max(0, Math.min(100, opponent.health)) / 100;
-        const healthColor = opponent.health > 60 ? '#cc2222' : opponent.health > 30 ? '#cc6600' : '#aa1111';
-        this.ctx.fillStyle = healthColor;
         if (healthPercent > 0) {
-          this.roundRect(healthBarX, healthBarY, healthBarWidth * healthPercent, healthBarHeight, 4);
+          const healthGradient = this.ctx.createLinearGradient(healthBarX, healthBarY, healthBarX + healthBarWidth * healthPercent, healthBarY);
+          if (opponent.health > 60) {
+            healthGradient.addColorStop(0, '#cc2222');
+            healthGradient.addColorStop(1, '#ff4444');
+          } else if (opponent.health > 30) {
+            healthGradient.addColorStop(0, '#cc6600');
+            healthGradient.addColorStop(1, '#ff8800');
+          } else {
+            healthGradient.addColorStop(0, '#aa1111');
+            healthGradient.addColorStop(1, '#dd2222');
+          }
+          this.ctx.fillStyle = healthGradient;
+          this.roundRect(healthBarX, healthBarY, healthBarWidth * healthPercent, healthBarHeight, 5);
           this.ctx.fill();
         }
 
-        // Combo (on the right)
+        // Health percentage text inside bar
+        this.ctx.font = 'bold 8px -apple-system, sans-serif';
+        this.ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+        this.ctx.textAlign = 'center';
+        this.ctx.textBaseline = 'middle';
+        this.ctx.fillText(`${Math.round(opponent.health)}%`, healthBarX + healthBarWidth / 2, healthBarY + healthBarHeight / 2);
+
+        // Combo display (bottom)
         if (opponent.combo > 0) {
-          this.ctx.font = 'bold 11px -apple-system, sans-serif';
-          this.ctx.fillStyle = opponent.combo >= 50 ? THEME.accent.warning : THEME.text.secondary;
-          this.ctx.textAlign = 'right';
-          this.ctx.fillText(`${opponent.combo}x`, panelX + cardWidth - 10, y + 12);
+          const comboX = panelX + 12;
+          const comboY = y + 50;
+
+          this.ctx.font = 'bold 12px -apple-system, sans-serif';
+          this.ctx.textAlign = 'left';
+          this.ctx.textBaseline = 'top';
+
+          // Combo color based on value
+          if (opponent.combo >= 100) {
+            this.ctx.fillStyle = THEME.accent.error;
+          } else if (opponent.combo >= 50) {
+            this.ctx.fillStyle = THEME.accent.warning;
+          } else {
+            this.ctx.fillStyle = THEME.text.secondary;
+          }
+
+          this.ctx.fillText(`${opponent.combo} COMBO`, comboX, comboY);
         }
       } else {
-        // Eliminated text
-        this.ctx.font = 'bold 10px -apple-system, sans-serif';
+        // Eliminated overlay
+        this.ctx.font = 'bold 12px -apple-system, sans-serif';
         this.ctx.fillStyle = THEME.accent.error;
-        this.ctx.textAlign = 'left';
-        this.ctx.fillText('ELIMINATED', panelX + 10, y + 32);
+        this.ctx.textAlign = 'center';
+        this.ctx.textBaseline = 'middle';
+        this.ctx.fillText('ELIMINATED', panelX + cardWidth / 2, y + cardHeight / 2 + 5);
+
+        // Final score for eliminated
+        this.ctx.font = '11px -apple-system, sans-serif';
+        this.ctx.fillStyle = THEME.text.muted;
+        this.ctx.fillText(`Final: ${opponent.score.toLocaleString()}`, panelX + cardWidth / 2, y + cardHeight / 2 + 22);
       }
     });
 
