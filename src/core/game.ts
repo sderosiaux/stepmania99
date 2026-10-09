@@ -1,862 +1,588 @@
-import type { Song, Chart, Note, GameplayState, Settings, ResultsData } from '../types';
-import { DEFAULT_SETTINGS } from '../types';
-import { audioManager } from '../audio';
-import { inputManager } from '../input';
-import { Renderer, type OpponentDisplayState } from '../render';
-import { findMatchingNote, judgeNote, isNoteMissed } from './timing';
-import { createScoreState, applyJudgment, calculateFinalScore, generateResults, type ScoreState } from './score';
+import type { Song, Chart, Note, Settings, ResultsData, Direction, DirectionStats, HitSample, ErrorMark } from '../types';
+import { DIRECTIONS } from '../types';
+import { audio, type SfxId } from '../audio';
+import { input } from '../input';
+import type { Stage } from '../render/stage';
+import type { Hud } from '../render/hud';
+import { THEME } from '../render/theme';
+import { buildTimingData, type TimingData } from './timing-data';
+import { JudgeEngine, autoplayInputs, type JudgeEvent, type SyntheticInput } from './judge';
+import {
+  createScoreState,
+  applyEvent,
+  chartTotals,
+  calculateScore,
+  calculatePercentage,
+  calculateGrade,
+  isFullCombo,
+  fullComboTier,
+  maxExScore,
+  judgedFraction,
+  lostPoints,
+  referenceLoss,
+  type ScoreState,
+} from './score';
 import { multiplayerGameManager } from '../multiplayer/game-manager';
 
 // ============================================================================
-// Game Controller
+// Game controller — one song (or one practice section), start to results.
+//
+// Time flow: performance.now() → output clock → song time (as heard) − user
+// offset. Inputs are judged at their own timestamps through the same mapping,
+// so frame rate never affects judgments. Song time runs `rate` times faster
+// than real time; every real-time constant below is scaled by it.
 // ============================================================================
 
-export type GameEventType = 'judgment' | 'combo-break' | 'song-end' | 'song-fail' | 'pause' | 'resume';
+/** Real ms of lead-in before the first note reaches the receptors */
+const LEAD_IN_MS = 3200;
+/** Misses are declared this late so an input event dispatched after a frame still gets its chance */
+const INPUT_GRACE_MS = 25;
+const RESUME_REWIND_MS = 2000;
+const ASSIST_LOOKAHEAD_MS = 250;
+const OUTRO_MS = 1200;
+const PRACTICE_LEAD_MS = 2000;
+const CURVE_SAMPLES = 100;
 
-export interface GameEvent {
-  type: GameEventType;
-  data?: unknown;
+export interface GameOptions {
+  autoplay: boolean;
+  multiplayer: boolean;
+  /** Loop a section of the chart (song ms), fail off, no record */
+  practice?: { from: number; to: number };
+  /** Pacemaker reference: personal-best loss curve, or null to pace against `paceTarget` */
+  paceCurve?: number[] | null;
+  paceTarget?: { label: string; percentage: number };
 }
 
-export type GameEventListener = (event: GameEvent) => void;
+type Phase = 'playing' | 'paused' | 'outro' | 'done';
 
 export class GameController {
-  private renderer: Renderer;
-  private settings: Settings;
+  private song!: Song;
+  private chart!: Chart;
+  private opts!: GameOptions;
+  private timing!: TimingData;
+  private notes: readonly Note[] = [];
+  private judge!: JudgeEngine;
+  private score!: ScoreState;
+  private rate = 1;
+  private phase: Phase = 'done';
+  private raf = 0;
+  private lastPerf = 0;
+  private lastSongTime = -Infinity;
+  private startMs = 0;
+  private endMs = 0;
+  private pausedAt = 0;
+  private loop = 1;
 
-  /** Current gameplay state */
-  private state: GameplayState | null = null;
+  private auto: SyntheticInput[] = [];
+  private autoIdx = 0;
+  private assistRows: number[] = [];
+  private assistIdx = 0;
+  private jumpRows = new Set<number>();
+  private cues: { at: number; run: () => void }[] = [];
+  private offsets: number[] = [];
+  private hits: HitSample[] = [];
+  private errors: ErrorMark[] = [];
+  private lossCurve: number[] = [];
+  private lifeHistory: { time: number; life: number }[] = [];
+  private dirStats: Record<Direction, number[]> = { left: [], down: [], up: [], right: [] };
+  private outroAt = 0;
+  private failed = false;
+  /** stop() ran — start() must not resume after its awaits */
+  private stopped = false;
 
-  /** Score tracking */
-  private scoreState: ScoreState | null = null;
+  onFinish: ((results: ResultsData) => void) | null = null;
 
-  /** Animation frame ID */
-  private frameId: number | null = null;
+  constructor(
+    private readonly stage: Stage,
+    private readonly hud: Hud,
+    private settings: Settings
+  ) {}
 
-  /** Game timing - when we started (performance.now) */
-  private gameStartTime: number = 0;
+  // --------------------------------------------------------------------------
+  // Lifecycle
+  // --------------------------------------------------------------------------
 
-  /** Offset to apply to performance.now() timing */
-  private perfTimeOffset: number = 0;
+  async start(song: Song, chart: Chart, opts: GameOptions): Promise<void> {
+    this.song = song;
+    this.chart = chart;
+    this.opts = opts;
+    // Battles are always 1.0x
+    this.rate = opts.multiplayer ? 1 : this.settings.rate;
+    this.timing = buildTimingData(chart.timing);
+    const p = opts.practice;
+    this.notes = p ? chart.notes.filter((n) => n.time >= p.from && n.time <= p.to) : chart.notes;
+    this.jumpRows = rowsWithJumps(this.notes);
+    this.loop = 1;
+    this.failed = false;
 
-  /** Offset to apply to audio time (just the song offset) */
-  private audioTimeOffset: number = 0;
+    await audio.unlock();
+    if (this.stopped) return;
+    audio.stopPreview(150);
+    audio.setVolumes({ music: this.settings.musicVolume, sfx: this.settings.sfxVolume, voice: this.settings.voiceVolume });
+    void audio.loadSfx();
 
-  /** Preparation time before first note (ms) - lets arrows scroll up from bottom */
-  private readonly PREP_TIME: number = 3000;
+    let buffer: AudioBuffer | null = null;
+    if (!song.silent) {
+      try {
+        buffer = await audio.loadMusic(`${song.basePath}/${song.musicFile}`);
+      } catch (e) {
+        console.warn('Music unavailable, playing on a silent clock', e);
+      }
+      if (this.stopped) return;
+    }
+    audio.setSong(buffer, this.rate);
 
-  /** Time when paused (for freezing game time) */
-  private pauseTime: number = 0;
+    const first = this.notes[0]?.time ?? 0;
+    const last = this.lastNoteEnd();
+    this.startMs = p ? first - PRACTICE_LEAD_MS * this.rate : Math.min(-1500 * this.rate, first - LEAD_IN_MS * this.rate);
+    this.endMs = p ? last + 600 * this.rate : Math.max(last + OUTRO_MS * this.rate, buffer ? Math.min(audio.songDurationMs, last + 6000) : 0);
 
-  /** Total time spent paused (to adjust game clock) */
-  private totalPauseDuration: number = 0;
+    this.auto = opts.autoplay ? autoplayInputs(this.notes) : [];
+    this.assistRows = [...new Set(this.notes.filter((n) => n.type !== 'mine').map((n) => n.time))].sort((a, b) => a - b);
+    this.resetRun();
 
-  /** Is game running */
-  private running: boolean = false;
+    // Visuals
+    this.stage.setPerspective(this.settings.perspective);
+    this.stage.setFocus(this.settings.focus);
+    this.hud.setFocus(this.settings.focus);
+    this.stage.background.setImage(song.background && song.basePath ? `${song.basePath}/${song.background}` : null);
+    const badge = [p ? 'PRACTICE' : opts.autoplay ? 'AUTOPLAY' : '', this.rate !== 1 ? `${this.rate}×` : ''].filter(Boolean).join(' · ');
+    this.hud.show(song, chart, badge);
+    const [l, r] = this.stage.laneScreenSpan();
+    this.hud.layout(this.stage.receptorScreenY(), [l, r], this.settings.perspective === 'tilted');
 
-  /** Event listeners */
-  private listeners: GameEventListener[] = [];
+    // Announcer cues on the song timeline
+    const goAt = Math.max(this.startMs + 1300 * this.rate, first - 1500 * this.rate);
+    this.cues = p
+      ? [{ at: this.startMs + 200 * this.rate, run: () => this.hud.message(`LOOP ${this.loop}`, 'ready', 900) }]
+      : [
+          { at: this.startMs + 250 * this.rate, run: () => this.hud.message('READY?', 'ready', 1100) },
+          { at: goAt, run: () => this.hud.message('GO!', 'go', 800) },
+        ];
+    if (!p) {
+      audio.loadSfx().then(() => {
+        if (this.phase !== 'playing') return;
+        audio.scheduleAt('vo-ready', this.startMs + 250 * this.rate);
+        audio.scheduleAt('vo-go', goAt);
+      });
+    }
 
-  /** Countdown state */
-  private countdown: { active: boolean; count: number; startTime: number; isResume: boolean } = {
-    active: false,
-    count: 3,
-    startTime: 0,
-    isResume: false,
+    if (opts.multiplayer) {
+      multiplayerGameManager.setOnAttackReceived((a) => this.injectAttack(a.note));
+      multiplayerGameManager.setOnOpponentEliminated((playerId) => {
+        if (this.phase !== 'playing') return;
+        const name = multiplayerGameManager.getOpponents().find((o) => o.id === playerId)?.name ?? 'RIVAL';
+        audio.play1('eliminated', { gain: 0.8 });
+        this.hud.message(`${name.toUpperCase()} OUT`, 'hint', 1400);
+      });
+    }
+
+    input.start();
+    this.phase = 'playing';
+    this.lastSongTime = -Infinity;
+    audio.play(this.startMs);
+    this.lastPerf = performance.now();
+    document.addEventListener('visibilitychange', this.onVisibility);
+    this.raf = requestAnimationFrame(this.frame);
+  }
+
+  /** Fresh judge and score for a run (or a practice loop) */
+  private resetRun(): void {
+    this.judge = new JudgeEngine(this.notes, this.rate);
+    const totals = chartTotals({ notes: this.notes });
+    this.score = createScoreState(totals.steps, totals.freezes);
+    this.autoIdx = 0;
+    this.assistIdx = 0;
+    this.offsets = [];
+    this.hits = [];
+    this.errors = [];
+    this.lossCurve = [0];
+    this.lifeHistory = [{ time: this.notes[0]?.time ?? 0, life: this.score.life }];
+    this.dirStats = { left: [], down: [], up: [], right: [] };
+  }
+
+  /**
+   * A rival's arrow: moved to a lane with no note within ±250 ms (an overlap would turn into a forced miss),
+   * dropped if every lane is busy. It counts in the totals like a chart note.
+   */
+  private injectAttack(attack: Note): void {
+    if (this.phase !== 'playing') return;
+    const gap = 250 * this.rate;
+    const busy = (lane: number) => this.judge.getNotes().some((n) => n.lane === lane && Math.abs(n.time - attack.time) < gap);
+    const lane = [attack.lane, 0, 1, 2, 3].find((l) => !busy(l));
+    if (lane === undefined) return;
+    const note: Note = { ...attack, lane, direction: DIRECTIONS[lane]! };
+    this.judge.addNote(note);
+    this.score = { ...this.score, totalSteps: this.score.totalSteps + 1 };
+    this.endMs = Math.max(this.endMs, note.time + OUTRO_MS * this.rate);
+  }
+
+  stop(): void {
+    this.stopped = true;
+    this.phase = 'done';
+    cancelAnimationFrame(this.raf);
+    document.removeEventListener('visibilitychange', this.onVisibility);
+    audio.stopSong();
+    input.stop();
+    this.hud.showPause(false, false);
+    this.hud.hide();
+    // Menus keep their effects; focus is a gameplay mode
+    this.stage.setFocus(false);
+    this.hud.setFocus(false);
+    multiplayerGameManager.setOnAttackReceived(() => {});
+    multiplayerGameManager.setOnOpponentEliminated(() => {});
+  }
+
+  setSettings(s: Settings): void {
+    // The rate is fixed for the run: the audio timeline was built with it
+    this.settings = { ...s, rate: this.settings.rate };
+    if (this.phase !== 'done') {
+      this.stage.setFocus(s.focus);
+      this.hud.setFocus(s.focus);
+    }
+  }
+
+  get isPaused(): boolean {
+    return this.phase === 'paused';
+  }
+
+  get isPlaying(): boolean {
+    return this.phase === 'playing';
+  }
+
+  get canPause(): boolean {
+    return this.phase === 'playing' && !this.opts.multiplayer;
+  }
+
+  get isPractice(): boolean {
+    return !!this.opts.practice;
+  }
+
+  /** User offset in song ms */
+  private get offset(): number {
+    return this.settings.offsetMs * this.rate;
+  }
+
+  pause(): void {
+    if (!this.canPause) return;
+    const now = performance.now();
+    const raw = audio.songTimeAt(now);
+    this.pausedAt = raw;
+    // Lanes are released at the pause instant: holds drain from there if not re-pressed after resume
+    input.releaseAll(now);
+    this.processInputs(raw - this.offset);
+    // Those releases may have finished the run (fail): never pause over it
+    if (this.phase !== 'playing') return;
+    audio.pause(raw);
+    this.phase = 'paused';
+    this.hud.showPause(true, false);
+  }
+
+  resume(): void {
+    if (this.phase !== 'paused') return;
+    input.drain();
+    this.hud.showPause(false, false);
+    this.phase = 'playing';
+    const from = this.pausedAt - RESUME_REWIND_MS * this.rate;
+    this.assistIdx = this.assistRows.findIndex((t) => t >= from);
+    if (this.assistIdx < 0) this.assistIdx = this.assistRows.length;
+    audio.play(from, 400);
+  }
+
+  private onVisibility = () => {
+    if (document.hidden && this.canPause) this.pause();
   };
 
-  /** Whether audio is available for this song */
-  private hasAudio: boolean = false;
+  // --------------------------------------------------------------------------
+  // Frame
+  // --------------------------------------------------------------------------
 
-  /** Demo/autoplay mode */
-  private autoplay: boolean = false;
+  private frame = () => {
+    if (this.phase === 'done') return;
+    this.raf = requestAnimationFrame(this.frame);
+    const now = performance.now();
+    const dt = Math.min(0.1, Math.max(0, (now - this.lastPerf) / 1000));
+    this.lastPerf = now;
 
-  constructor(canvas: HTMLCanvasElement, settings: Settings = DEFAULT_SETTINGS) {
-    this.renderer = new Renderer(canvas);
-    this.settings = settings;
-  }
+    audio.sync();
+    input.pollGamepads();
+    const songNow = audio.songTimeAt(now) - this.offset;
 
-  /**
-   * Add event listener
-   */
-  addEventListener(listener: GameEventListener): void {
-    this.listeners.push(listener);
-  }
-
-  /**
-   * Remove event listener
-   */
-  removeEventListener(listener: GameEventListener): void {
-    const index = this.listeners.indexOf(listener);
-    if (index !== -1) {
-      this.listeners.splice(index, 1);
-    }
-  }
-
-  /**
-   * Emit event to listeners
-   */
-  private emit(event: GameEvent): void {
-    for (const listener of this.listeners) {
-      listener(event);
-    }
-  }
-
-  /**
-   * Apply visual feedback for a judgment (receptor glow, flash, judgment display, hit effect)
-   */
-  private applyJudgmentFeedback(
-    direction: import('../types').Direction,
-    grade: import('../types').JudgmentGrade,
-    currentTime: number,
-    timingDiff: number = 0
-  ): void {
-    this.renderer.triggerReceptorGlow(direction, currentTime);
-    this.renderer.triggerBackgroundFlash(direction, currentTime);
-    this.renderer.setJudgment(grade, currentTime, timingDiff);
-    this.renderer.addHitEffect(direction, grade, currentTime);
-  }
-
-  /**
-   * Sync gameplay state combo/maxCombo from score state
-   */
-  private syncStateFromScore(): void {
-    if (!this.state || !this.scoreState) return;
-    this.state.combo = this.scoreState.combo;
-    this.state.maxCombo = this.scoreState.maxCombo;
-  }
-
-  /**
-   * Start a new game with the given song and chart
-   */
-  async start(song: Song, chart: Chart, autoplay: boolean = false): Promise<void> {
-    this.autoplay = autoplay;
-    // Try to load audio (may fail for demo songs)
-    this.hasAudio = false;
-    try {
-      // Use basePath if available (for .sm files), otherwise use song id
-      const audioPath = song.basePath
-        ? `${song.basePath}/${song.musicFile}`
-        : `songs/${song.id}/${song.musicFile}`;
-      await audioManager.load(audioPath);
-      this.hasAudio = true;
-    } catch (error) {
-      console.warn('Audio not available, running in silent mode:', error);
-      this.hasAudio = false;
-    }
-
-    // Create fresh notes array (deep clone to avoid mutating original)
-    const activeNotes: Note[] = chart.notes.map((n) => {
-      const note: Note = {
-        ...n,
-        judged: false,
-      };
-      if (n.type === 'hold') {
-        note.holdState = {
-          isHeld: false,
-          started: false,
-          completed: false,
-          dropped: false,
-          progress: 0,
-        };
+    if (this.phase === 'playing') {
+      this.processInputs(songNow);
+      if (this.opts.autoplay) {
+        while (this.autoIdx < this.auto.length && this.auto[this.autoIdx]!.time <= songNow) {
+          const a = this.auto[this.autoIdx++]!;
+          if (a.pressed) this.stage.playfield.press(a.lane);
+          this.handle(a.pressed ? this.judge.press(a.lane, a.time) : this.judge.release(a.lane, a.time));
+        }
       }
-      return note;
-    });
+      this.handle(this.judge.advance(songNow - INPUT_GRACE_MS * this.rate));
+      this.runCues(songNow);
+      this.scheduleAssist();
+      if (this.opts.multiplayer) {
+        multiplayerGameManager.update(this.score.life, this.score.combo, calculateScore(this.score), songNow);
+      }
+      if (this.opts.practice) this.checkLoop(songNow);
+      else this.checkEnd(songNow);
+    } else if (this.phase === 'outro') {
+      input.drain();
+      if (now >= this.outroAt) this.finish();
+    } else {
+      input.drain();
+    }
 
-    // Initialize state
-    this.state = {
-      song,
-      chart,
-      activeNotes,
-      judgments: [],
-      score: 0,
-      combo: 0,
-      maxCombo: 0,
-      startTime: 0,
-      paused: false,
-      ended: false,
-    };
+    this.render(songNow, now / 1000, dt);
+  };
 
-    // Count total judgments: tap notes count as 1, hold notes count as 2 (head + tail)
-    const holdCount = chart.notes.filter(n => n.type === 'hold').length;
-    const totalJudgments = chart.notes.length + holdCount;
-    this.scoreState = createScoreState(totalJudgments);
-
-    // Reset timing stats and pause tracking for new game
-    this.renderer.resetTimings();
-    this.renderer.setAudioOffset(this.settings.audioOffset);
-    this.renderer.setNoteSkin(this.settings.noteSkin);
-    this.pauseTime = 0;
-    this.totalPauseDuration = 0;
-
-    // Start input listening
-    inputManager.start();
-
-    // Start countdown
-    this.countdown = {
-      active: true,
-      count: 3,
-      startTime: performance.now(),
-      isResume: false,
-    };
-
-    this.running = true;
-    this.frameId = requestAnimationFrame(this.loop.bind(this));
+  private processInputs(songNow: number): void {
+    for (const ev of input.drain()) {
+      const t = Math.min(songNow, audio.songTimeAt(ev.timestamp) - this.offset);
+      if (this.opts.autoplay) continue;
+      if (ev.pressed) {
+        this.stage.playfield.press(ev.lane);
+        this.handle(this.judge.press(ev.lane, t));
+      } else {
+        this.handle(this.judge.release(ev.lane, t));
+      }
+    }
   }
 
-  /**
-   * Main game loop
-   */
-  private loop(timestamp: number): void {
-    if (!this.running || !this.state) return;
+  private handle(events: JudgeEvent[]): void {
+    const canFail = !this.opts.autoplay && !this.opts.practice;
+    for (const e of events) {
+      const prev = this.score;
+      this.score = applyEvent(this.score, e, canFail);
+      this.lifeHistory.push({ time: e.time, life: this.score.life });
+      this.sampleCurve();
+      const lane = e.note.lane;
 
-    // Handle countdown
-    if (this.countdown.active) {
-      this.handleCountdown(timestamp);
-      this.frameId = requestAnimationFrame(this.loop.bind(this));
-      return;
-    }
+      if (e.kind === 'tap') {
+        if (e.grade !== 'miss') {
+          this.offsets.push(e.offset);
+          this.hits.push({ offset: e.offset, quant: e.note.quant, jump: this.jumpRows.has(e.note.time), lane });
+          this.dirStats[DIRECTIONS[lane]!].push(e.offset);
+          this.stage.playfield.hit(lane, e.grade);
+          if (e.grade === 'marvelous' || e.grade === 'perfect') this.stage.background.hit(THEME.lane[lane]!, 0.12);
+        }
+        if (e.grade === 'miss' || e.grade === 'boo' || e.grade === 'good') this.errors.push({ time: e.note.time, kind: e.grade });
+        this.hud.judgment(e.grade, e.offset, this.score.combo, this.settings.showHitMs);
+      } else if (e.kind === 'hold') {
+        if (e.grade === 'ng') this.errors.push({ time: e.time, kind: 'ng' });
+        this.stage.playfield.holdDone(lane, e.grade === 'ok');
+        this.hud.holdResult(e.grade);
+        this.hud.combo(this.score.combo);
+      } else {
+        this.errors.push({ time: e.note.time, kind: 'mine' });
+        this.stage.playfield.mine(lane);
+        this.stage.shake(0.35);
+        this.stage.background.hit(THEME.mine, 1.2);
+        audio.play1('mine-explode');
+        this.hud.combo(this.score.combo);
+      }
 
-    // Handle pause
-    if (this.state.paused) {
-      // Get opponents for multiplayer display
-      const opponents = this.getOpponentsForDisplay();
-      this.renderer.renderGameplay(
-        this.state,
-        this.getCurrentGameTime(),
-        new Set(inputManager.getHeldDirections()),
-        this.settings.cmod,
-        this.scoreState?.health ?? 50,
-        false,
-        opponents
-      );
-      this.frameId = requestAnimationFrame(this.loop.bind(this));
-      return;
-    }
+      if (prev.combo >= 20 && this.score.combo === 0) {
+        audio.play1('combo-break', { gain: 0.7 });
+        this.hud.comboBreak();
+      }
+      this.milestone(prev.combo, this.score.combo);
 
-    // Get current game time (synced to audio)
-    const currentTime = this.getCurrentGameTime();
-
-    // Handle autoplay mode
-    if (this.autoplay) {
-      this.processAutoplay(currentTime);
-    }
-
-    // Process inputs (skip in autoplay)
-    if (!this.autoplay) {
-      this.processInputs(currentTime);
-    }
-
-    // Update hold notes
-    this.updateHolds(currentTime);
-
-    // Check for missed notes
-    this.checkMisses(currentTime);
-
-    // Update score display
-    if (this.scoreState) {
-      this.state.score = calculateFinalScore(this.scoreState);
-
-      // Check for lifebar fail
-      if (this.scoreState.failed && !this.state.ended) {
-        this.failSong();
+      if (this.score.failed && !this.failed) {
+        this.fail();
         return;
       }
     }
+  }
 
-    // Check for song end
-    this.checkSongEnd(currentTime);
+  /** Points lost at each 1% of the chart judged — the next run's pacemaker */
+  private sampleCurve(): void {
+    const upTo = Math.floor(judgedFraction(this.score) * CURVE_SAMPLES);
+    while (this.lossCurve.length <= upTo) this.lossCurve.push(Math.round(lostPoints(this.score)));
+  }
 
-    // Render
-    const opponents = this.getOpponentsForDisplay();
-    this.renderer.renderGameplay(
-      this.state,
-      currentTime,
-      new Set(inputManager.getHeldDirections()),
-      this.settings.cmod,
-      this.scoreState?.health ?? 50,
-      this.autoplay,
-      opponents
-    );
+  private milestone(prev: number, combo: number): void {
+    if (combo <= prev || Math.floor(combo / 100) === Math.floor(prev / 100)) return;
+    const VOICE: Record<number, SfxId> = { 100: 'vo-combo-100', 200: 'vo-combo-200', 500: 'vo-combo-500' };
+    const hundred = Math.floor(combo / 100) * 100;
+    audio.play1('milestone', { gain: 0.6 });
+    const vo = VOICE[hundred];
+    if (vo) audio.play1(vo, { duck: true });
+    this.stage.playfield.fireworks(THEME.accent.gold, 120);
+    this.stage.background.hit(THEME.accent.gold, 1.2);
+  }
 
-    // Continue loop
-    if (this.running && !this.state.ended) {
-      this.frameId = requestAnimationFrame(this.loop.bind(this));
+  private runCues(songNow: number): void {
+    while (this.cues.length && this.cues[0]!.at <= songNow) this.cues.shift()!.run();
+  }
+
+  private scheduleAssist(): void {
+    if (!this.settings.assistTick) return;
+    // Horizon from the audio clock itself: scheduleAt drops anything before ctx.currentTime,
+    // which is ahead of the heard time by the output latency (huge on Bluetooth)
+    const until = audio.scheduledSongTimeMs() + ASSIST_LOOKAHEAD_MS * this.rate;
+    while (this.assistIdx < this.assistRows.length && this.assistRows[this.assistIdx]! <= until) {
+      audio.scheduleAt('assist-clap', this.assistRows[this.assistIdx++]!, 0.8);
     }
   }
 
-  /**
-   * Handle countdown before song starts
-   */
-  private handleCountdown(timestamp: number): void {
-    const elapsed = timestamp - this.countdown.startTime;
-    const countdownDuration = 1000; // 1 second per count
+  /** Practice: when the section is over, report it and replay it */
+  private checkLoop(songNow: number): void {
+    if (songNow < this.endMs) return;
+    const pct = calculatePercentage(this.score);
+    const marv = this.hits.length ? (this.hits.filter((h) => Math.abs(h.offset) <= 22.5).length / Math.max(1, this.score.totalSteps)) * 100 : 0;
+    this.hud.message(`${pct.toFixed(1)}% · ${marv.toFixed(0)}% MARV`, fullComboTier(this.score) ? 'fc-great' : 'hint', 1800);
+    if (fullComboTier(this.score)) audio.play1('milestone', { gain: 0.6 });
+    this.loop++;
+    this.resetRun();
+    this.cues = [{ at: this.startMs + 200 * this.rate, run: () => this.hud.message(`LOOP ${this.loop}`, 'ready', 900) }];
+    audio.play(this.startMs);
+  }
 
-    const currentCount = 3 - Math.floor(elapsed / countdownDuration);
-
-    if (currentCount <= 0) {
-      // Countdown finished
-      this.countdown.active = false;
-
-      if (this.countdown.isResume) {
-        // Resume: calculate total pause duration and resume audio
-        if (this.pauseTime > 0) {
-          this.totalPauseDuration += performance.now() - this.pauseTime;
-          this.pauseTime = 0;
-        }
-        if (this.hasAudio) {
-          audioManager.resume();
-        }
-      } else {
-        // Initial start: set up timing
-        this.gameStartTime = performance.now();
-
-        // For performance.now() timing: starts at -PREP_TIME and increases
-        // Game time 0 = when beat 0 occurs = PREP_TIME after gameStartTime
-        this.perfTimeOffset = this.state!.song.offset + this.settings.audioOffset - this.PREP_TIME;
-
-        // For audio timing: audio time 0 = game time (song.offset)
-        // Because audio.play() is called at PREP_TIME, when game time should be 0
-        this.audioTimeOffset = this.state!.song.offset + this.settings.audioOffset;
-
-        // Delay audio start by prep time (only if audio is available)
-        if (this.hasAudio) {
-          setTimeout(() => {
-            if (this.running && !this.state?.paused) {
-              // Start audio at time 0 (offset is already baked into note times)
-              audioManager.play(0);
-            }
-          }, this.PREP_TIME);
-        }
-      }
+  private checkEnd(songNow: number): void {
+    const done = this.judge.isComplete() && songNow >= this.lastNoteEnd() + 600 * this.rate;
+    if (!done && songNow < this.endMs) return;
+    this.phase = 'outro';
+    const tier = fullComboTier(this.score);
+    if (tier) {
+      const [label, vo]: [string, SfxId] =
+        tier === 'marvelous'
+          ? ['MARVELOUS FULL COMBO', 'vo-marvelous-full-combo']
+          : tier === 'perfect'
+            ? ['PERFECT FULL COMBO', 'vo-perfect-full-combo']
+            : ['FULL COMBO', 'vo-full-combo'];
+      this.hud.message(label, `fc-${tier}`, 2600);
+      audio.play1('clear-fanfare', { gain: 0.8 });
+      audio.play1(vo, { duck: true });
+      this.stage.playfield.fireworks(tier === 'marvelous' ? '#e8fbff' : tier === 'perfect' ? THEME.accent.gold : THEME.accent.success, 400);
     } else {
-      this.countdown.count = currentCount;
+      this.hud.message('CLEARED', 'cleared', 2200);
+      audio.play1('clear-fanfare', { gain: 0.8 });
+      audio.play1('vo-cleared', { duck: true });
     }
-
-    // Render countdown with song info and timing panel
-    this.renderer.clear();
-    this.renderer.drawLanes();
-    this.renderer.drawReceptors(timestamp, new Set());
-    this.renderer.drawCountdown(this.countdown.count);
-
-    // Show song info and timing panel during countdown
-    if (this.state) {
-      this.renderer.drawSongInfo(this.state.song.title, this.state.song.artist);
-      this.renderer.drawScore(0);
-      this.renderer.drawHealthBar(50);
-      this.renderer.setCombo(0, timestamp);
-      this.renderer.drawCombo(timestamp);
-      this.renderer.drawJudgment(timestamp);
-      const totalSteps = this.state.chart.notes.length;
-      this.renderer.drawTimingStats(totalSteps, totalSteps);
-    }
+    audio.fadeOut(2.2);
+    this.outroAt = performance.now() + 2800;
   }
 
-  /**
-   * Get current game time in milliseconds
-   */
-  private getCurrentGameTime(): number {
-    if (this.countdown.active) return -this.PREP_TIME - 1000;
-
-    // When paused, return the frozen pause time (use perf timing)
-    if (this.state?.paused && this.pauseTime > 0) {
-      return this.pauseTime - this.gameStartTime - this.totalPauseDuration + this.perfTimeOffset;
-    }
-
-    // Use audio time as master clock when playing (if audio is available)
-    if (this.hasAudio && audioManager.isPlaying) {
-      // Audio time 0 = game time (song.offset), which is usually 0
-      return audioManager.getCurrentTimeMs() + this.audioTimeOffset;
-    }
-
-    // Fallback to performance timing (always used in silent mode)
-    return performance.now() - this.gameStartTime - this.totalPauseDuration + this.perfTimeOffset;
+  private lastNoteEnd(): number {
+    return (this.judge?.getNotes() ?? this.notes).reduce((m, n) => Math.max(m, n.endTime ?? n.time), 0);
   }
 
-  /**
-   * Process buffered inputs
-   */
-  private processInputs(currentTime: number): void {
-    if (!this.state || !this.scoreState) return;
+  private fail(): void {
+    this.failed = true;
+    this.phase = 'outro';
+    audio.tapeStop(1.6);
+    audio.play1('fail');
+    audio.play1('vo-failed', { duck: false });
+    this.hud.message('FAILED', 'failed', 2600);
+    this.stage.shake(0.6);
+    this.stage.background.hit(THEME.accent.danger, 1.5);
+    if (this.opts.multiplayer) multiplayerGameManager.notifyDeath();
+    this.outroAt = performance.now() + 3000;
+  }
 
-    const inputs = inputManager.flush();
-    const now = performance.now();
+  private finish(): void {
+    const results = this.results();
+    if (this.opts.multiplayer && !this.failed) multiplayerGameManager.notifyGameFinished(results.score);
+    this.stop();
+    this.onFinish?.(results);
+  }
 
-    for (const input of inputs) {
-      if (!input.pressed) continue; // Only process key presses
+  // --------------------------------------------------------------------------
+  // Render
+  // --------------------------------------------------------------------------
 
-      // Calculate input game time
-      // When audio is playing, use audio time minus the delta since input happened
-      // This keeps input timing in sync with audio playback
-      let inputGameTime: number;
-      if (this.hasAudio && audioManager.isPlaying) {
-        const timeSinceInput = now - input.timestamp;
-        inputGameTime = currentTime - timeSinceInput;
-      } else {
-        // Fallback to performance timing
-        inputGameTime = input.timestamp - this.gameStartTime - this.totalPauseDuration + this.perfTimeOffset;
-      }
-
-      // Find matching note (check both tap and hold note heads)
-      const note = findMatchingNote(this.state.activeNotes, input.direction, inputGameTime);
-
-      if (note) {
-        // Judge the note head
-        const judgment = judgeNote(note, inputGameTime);
-
-        // For hold notes, start the hold instead of marking as fully judged
-        if (note.type === 'hold' && note.holdState) {
-          note.holdState.started = true;
-          note.holdState.isHeld = true;
-          // Don't mark as judged yet - will be judged when completed or dropped
-
-          this.state.judgments.push(judgment);
-
-          // Update score for the head hit
-          const prevCombo = this.scoreState.combo;
-          this.scoreState = applyJudgment(this.scoreState, judgment);
-
-          this.syncStateFromScore();
-          this.applyJudgmentFeedback(input.direction, judgment.grade, currentTime, judgment.timingDiff);
-
-          if (judgment.grade !== 'miss') {
-            this.renderer.recordTiming(input.direction, judgment.timingDiff);
+  private render(songNow: number, time: number, dt: number): void {
+    const frozen = this.phase === 'paused' ? this.lastSongTime : songNow;
+    this.lastSongTime = frozen;
+    const beat = this.timing.timeToBeat(frozen);
+    const { width, height } = this.stage.size;
+    this.stage.background.update({
+      width,
+      height,
+      time,
+      beat,
+      energy: Math.min(1, this.score.combo / 150),
+      danger: this.score.life < 25 && this.phase !== 'done' && !this.opts.practice ? 1 - this.score.life / 25 : 0,
+      dt,
+    });
+    this.stage.playfield.update({
+      songTime: frozen,
+      beat,
+      time,
+      dt,
+      cmod: this.settings.cmod,
+      rate: this.rate,
+      notes: this.judge.getNotes(),
+      runtime: (n: Note) => this.judge.get(n),
+      held: [0, 1, 2, 3].map((l) => this.judge.isHeld(l)),
+      combo: this.score.combo,
+    });
+    const first = this.notes[0]?.time ?? 0;
+    const last = this.lastNoteEnd();
+    const pace =
+      this.opts.paceTarget && !this.opts.practice && judgedFraction(this.score) > 0
+        ? {
+            label: this.opts.paceTarget.label,
+            delta: Math.round(referenceLoss(this.opts.paceCurve ?? null, this.opts.paceTarget.percentage, judgedFraction(this.score)) - lostPoints(this.score)),
           }
-
-          this.emit({ type: 'judgment', data: judgment });
-          if (prevCombo > 0 && this.scoreState.combo === 0) {
-            this.emit({ type: 'combo-break' });
-          }
-        } else {
-          // Regular tap note
-          note.judged = true;
-          note.judgment = judgment;
-          this.state.judgments.push(judgment);
-
-          const prevCombo = this.scoreState.combo;
-          this.scoreState = applyJudgment(this.scoreState, judgment);
-          this.syncStateFromScore();
-          this.applyJudgmentFeedback(input.direction, judgment.grade, currentTime, judgment.timingDiff);
-
-          if (judgment.grade !== 'miss') {
-            this.renderer.recordTiming(input.direction, judgment.timingDiff);
-          }
-
-          this.emit({ type: 'judgment', data: judgment });
-          if (prevCombo > 0 && this.scoreState.combo === 0) {
-            this.emit({ type: 'combo-break' });
-          }
-        }
-      } else {
-        // No matching note - still show receptor press and flash
-        this.renderer.triggerReceptorGlow(input.direction, currentTime);
-        this.renderer.triggerBackgroundFlash(input.direction, currentTime);
-      }
-    }
+        : null;
+    this.hud.update({
+      life: this.score.life,
+      score: calculateScore(this.score),
+      percentage: calculatePercentage(this.score),
+      combo: this.score.combo,
+      progress: (frozen - first) / Math.max(1, last - first),
+      elapsedMs: Math.max(0, frozen),
+      totalMs: last,
+      bpm: this.timing.bpmAt(beat) * this.rate,
+      counts: this.score.counts,
+      holds: this.score.holds,
+      opponents: this.opts.multiplayer ? multiplayerGameManager.getOpponents() : [],
+      pace,
+    });
+    this.stage.render(dt);
   }
 
-  /**
-   * Process autoplay - auto-hit notes at perfect timing
-   */
-  private processAutoplay(currentTime: number): void {
-    if (!this.state || !this.scoreState) return;
-
-    // Hit notes that are at the current time (within a small window)
-    for (const note of this.state.activeNotes) {
-      if (note.judged) continue;
-
-      // For hold notes that haven't started yet
-      if (note.type === 'hold' && note.holdState && !note.holdState.started) {
-        const timeDiff = currentTime - note.time;
-        if (timeDiff >= -5 && timeDiff <= 20) {
-          // Start the hold
-          note.holdState.started = true;
-          note.holdState.isHeld = true;
-
-          // Create a "marvelous" judgment for the head hit
-          const judgment = {
-            noteId: note.id,
-            timingDiff: Math.random() * 10 - 5,
-            grade: 'marvelous' as const,
-            time: currentTime,
-          };
-
-          this.state.judgments.push(judgment);
-
-          this.scoreState = applyJudgment(this.scoreState, judgment);
-          this.syncStateFromScore();
-          this.applyJudgmentFeedback(note.direction, judgment.grade, currentTime, judgment.timingDiff);
-          this.emit({ type: 'judgment', data: judgment });
-        }
-        continue;
-      }
-
-      // For active holds in autoplay - keep them held until completion
-      if (note.type === 'hold' && note.holdState?.started && !note.holdState?.completed) {
-        note.holdState.isHeld = true;
-        continue;
-      }
-
-      // For tap notes
-      if (note.type !== 'hold') {
-        const timeDiff = currentTime - note.time;
-        if (timeDiff >= -5 && timeDiff <= 20) {
-          const judgment = {
-            noteId: note.id,
-            timingDiff: Math.random() * 10 - 5,
-            grade: 'marvelous' as const,
-            time: currentTime,
-          };
-
-          note.judged = true;
-          note.judgment = judgment;
-          this.state.judgments.push(judgment);
-
-          this.scoreState = applyJudgment(this.scoreState, judgment);
-          this.syncStateFromScore();
-          this.applyJudgmentFeedback(note.direction, judgment.grade, currentTime, judgment.timingDiff);
-          this.emit({ type: 'judgment', data: judgment });
-        }
-      }
-    }
-  }
-
-  /**
-   * Check for missed notes
-   */
-  private checkMisses(currentTime: number): void {
-    if (!this.state || !this.scoreState) return;
-
-    for (const note of this.state.activeNotes) {
-      if (note.judged) continue;
-
-      // For hold notes, only check the head timing
-      if (note.type === 'hold' && note.holdState?.started) continue;
-
-      if (isNoteMissed(note.time, currentTime)) {
-        note.judged = true;
-
-        // For hold notes, also mark as dropped
-        if (note.type === 'hold' && note.holdState) {
-          note.holdState.dropped = true;
-        }
-
-        const judgment = {
-          noteId: note.id,
-          timingDiff: currentTime - note.time,
-          grade: 'miss' as const,
-          time: currentTime,
-        };
-
-        note.judgment = judgment;
-        this.state.judgments.push(judgment);
-
-        const prevCombo = this.scoreState.combo;
-        this.scoreState = applyJudgment(this.scoreState, judgment);
-        this.syncStateFromScore();
-
-        this.renderer.setJudgment('miss', currentTime);
-        this.emit({ type: 'judgment', data: judgment });
-
-        if (prevCombo > 0) {
-          this.emit({ type: 'combo-break' });
-        }
-      }
-    }
-  }
-
-  /**
-   * Update hold notes - check if still being held, mark completed or dropped
-   */
-  private updateHolds(currentTime: number): void {
-    if (!this.state || !this.scoreState) return;
-
-    const heldDirections = inputManager.getHeldDirections();
-
-    for (const note of this.state.activeNotes) {
-      if (note.type !== 'hold') continue;
-      if (!note.holdState) continue;
-      if (note.holdState.completed || note.holdState.dropped) continue;
-
-      // Update isHeld status
-      const isCurrentlyHeld = heldDirections.includes(note.direction);
-      note.holdState.isHeld = isCurrentlyHeld;
-
-      // If hold has started, check for drop or completion
-      if (note.holdState.started) {
-        // Calculate progress
-        const endTime = note.endTime ?? note.time;
-        const duration = endTime - note.time;
-        note.holdState.progress = Math.min(1, (currentTime - note.time) / duration);
-
-        // Grace window for releasing hold (generous window for comfort)
-        const holdGraceWindow = 200;
-
-        // Check for release
-        if (!isCurrentlyHeld) {
-          const timeUntilEnd = endTime - currentTime;
-
-          if (timeUntilEnd > holdGraceWindow) {
-            // Released too early - dropped the hold
-            note.holdState.dropped = true;
-            note.judged = true;
-
-            const judgment = {
-              noteId: note.id,
-              timingDiff: currentTime - endTime,
-              grade: 'boo' as const,
-              time: currentTime,
-            };
-
-            this.state.judgments.push(judgment);
-
-            const prevCombo = this.scoreState.combo;
-            this.scoreState = applyJudgment(this.scoreState, judgment);
-            this.syncStateFromScore();
-
-            this.renderer.setJudgment('boo', currentTime);
-            this.emit({ type: 'judgment', data: judgment });
-
-            if (prevCombo > 0) {
-              this.emit({ type: 'combo-break' });
-            }
-          } else {
-            // Released within grace window - complete the hold successfully
-            note.holdState.completed = true;
-            note.holdState.progress = 1;
-            note.judged = true;
-
-            const judgment = {
-              noteId: note.id,
-              timingDiff: -timeUntilEnd,
-              grade: 'perfect' as const,
-              time: currentTime,
-            };
-
-            this.state.judgments.push(judgment);
-            this.scoreState = applyJudgment(this.scoreState, judgment);
-            this.syncStateFromScore();
-            this.applyJudgmentFeedback(note.direction, 'perfect', currentTime, -timeUntilEnd);
-          }
-        }
-
-        // Check for completion (held all the way)
-        if (currentTime >= endTime && !note.holdState.dropped && !note.holdState.completed) {
-          note.holdState.completed = true;
-          note.holdState.progress = 1;
-          note.judged = true;
-
-          const judgment = {
-            noteId: note.id,
-            timingDiff: 0,
-            grade: 'perfect' as const,
-            time: currentTime,
-          };
-
-          this.state.judgments.push(judgment);
-          this.scoreState = applyJudgment(this.scoreState, judgment);
-          this.syncStateFromScore();
-          this.applyJudgmentFeedback(note.direction, 'perfect', currentTime, 0);
-        }
-      }
-    }
-  }
-
-  /**
-   * Check if song has ended
-   */
-  private checkSongEnd(currentTime: number): void {
-    if (!this.state || !this.scoreState) return;
-
-    // Force-complete any hold notes that are past their end time
-    for (const note of this.state.activeNotes) {
-      if (note.type !== 'hold' || !note.holdState) continue;
-      if (note.judged || note.holdState.completed || note.holdState.dropped) continue;
-
-      const endTime = note.endTime ?? note.time;
-      if (currentTime > endTime + 200) {
-        // Hold time passed - complete if started, miss if not
-        if (note.holdState.started) {
-          note.holdState.completed = true;
-          note.holdState.progress = 1;
-        } else {
-          note.holdState.dropped = true;
-        }
-        note.judged = true;
-      }
-    }
-
-    // Check if all notes are judged
-    const allJudged = this.state.activeNotes.every((n) => n.judged);
-
-    // Check if we've passed the last note by a margin (use endTime for holds)
-    const lastNote = this.state.activeNotes[this.state.activeNotes.length - 1];
-    const lastNoteEndTime = lastNote
-      ? (lastNote.endTime ?? lastNote.time)
-      : 0;
-    const pastLastNote = lastNote ? currentTime > lastNoteEndTime + 2000 : true;
-
-    // Check if audio has ended (only if we have audio)
-    let pastAudioEnd = false;
-    if (this.hasAudio) {
-      const audioDuration = audioManager.getDurationMs();
-      pastAudioEnd = audioDuration > 0 && currentTime > audioDuration + 1000;
-    }
-
-    if ((allJudged && pastLastNote) || pastAudioEnd) {
-      this.endSong();
-    }
-  }
-
-  /**
-   * End the current song
-   */
-  private endSong(): void {
-    if (!this.state || this.state.ended) return;
-
-    this.state.ended = true;
-    if (this.hasAudio) {
-      audioManager.stop();
-    }
-    inputManager.stop();
-    this.running = false;
-
-    this.emit({ type: 'song-end', data: this.getResults() });
-  }
-
-  /**
-   * Fail the song (lifebar depleted)
-   */
-  private failSong(): void {
-    if (!this.state || this.state.ended) return;
-
-    this.state.ended = true;
-    if (this.hasAudio) {
-      audioManager.stop();
-    }
-    inputManager.stop();
-    this.running = false;
-
-    this.emit({ type: 'song-fail', data: this.getResults() });
-  }
-
-  /**
-   * Pause the game
-   */
-  pause(): void {
-    if (!this.state || this.state.paused || this.state.ended || this.countdown.active) return;
-
-    this.state.paused = true;
-    this.pauseTime = performance.now(); // Record when we paused
-    if (this.hasAudio) {
-      audioManager.pause();
-    }
-    inputManager.clear();
-
-    this.emit({ type: 'pause' });
-  }
-
-  /**
-   * Resume the game
-   */
-  resume(): void {
-    if (!this.state || !this.state.paused) return;
-
-    // Start a short countdown before resuming
-    // Note: pauseTime stays set - we'll calculate duration when countdown finishes
-    this.countdown = {
-      active: true,
-      count: 3,
-      startTime: performance.now(),
-      isResume: true,
+  private results(): ResultsData {
+    const s = this.score;
+    const directionStats = Object.fromEntries(
+      DIRECTIONS.map((d) => {
+        const t = this.dirStats[d];
+        const stats: DirectionStats = { count: t.length, avgTiming: t.length ? t.reduce((a, b) => a + b, 0) / t.length : 0, timings: t };
+        return [d, stats];
+      })
+    ) as Record<Direction, DirectionStats>;
+    while (this.lossCurve.length <= CURVE_SAMPLES) this.lossCurve.push(Math.round(lostPoints(s)));
+    return {
+      song: this.song,
+      chart: this.chart,
+      score: calculateScore(s),
+      exScore: s.exScore,
+      maxExScore: maxExScore(s),
+      grade: calculateGrade(s),
+      maxCombo: s.maxCombo,
+      judgmentCounts: { ...s.counts },
+      holdCounts: { ...s.holds },
+      minesHit: s.minesHit,
+      totalNotes: s.totalSteps,
+      percentage: calculatePercentage(s),
+      failed: s.failed,
+      isFullCombo: isFullCombo(s),
+      offsets: this.offsets,
+      hits: this.hits,
+      errors: this.errors,
+      lossCurve: this.lossCurve,
+      rate: this.rate,
+      lifeHistory: this.lifeHistory,
+      directionStats,
+      autoplay: this.opts.autoplay,
     };
-
-    this.state.paused = false;
-
-    // Audio will be resumed after countdown
   }
+}
 
-  /**
-   * Toggle pause state
-   */
-  togglePause(): void {
-    if (!this.state) return;
-
-    if (this.state.paused) {
-      this.resume();
-    } else {
-      this.pause();
-    }
-  }
-
-  /**
-   * Stop the game completely
-   */
-  stop(): void {
-    this.running = false;
-
-    if (this.frameId !== null) {
-      cancelAnimationFrame(this.frameId);
-      this.frameId = null;
-    }
-
-    if (this.hasAudio) {
-      audioManager.stop();
-    }
-    inputManager.stop();
-
-    this.state = null;
-    this.scoreState = null;
-  }
-
-  /**
-   * Get current results
-   */
-  getResults(): ResultsData | null {
-    if (!this.state || !this.scoreState) return null;
-
-    const results = generateResults(this.scoreState, this.state.song, this.state.chart);
-    // Add direction stats from renderer
-    results.directionStats = this.renderer.getDirectionStats();
-    return results;
-  }
-
-  /**
-   * Check if game is running
-   */
-  isRunning(): boolean {
-    return this.running;
-  }
-
-  /**
-   * Check if game is paused
-   */
-  isPaused(): boolean {
-    return this.state?.paused ?? false;
-  }
-
-  /**
-   * Check if game is in countdown (either start or resume countdown)
-   */
-  isInCountdown(): boolean {
-    return this.countdown.active;
-  }
-
-  /**
-   * Update settings
-   */
-  setSettings(settings: Partial<Settings>): void {
-    this.settings = { ...this.settings, ...settings };
-  }
-
-  /**
-   * Get opponents for display in multiplayer mode
-   * Returns empty array if not in multiplayer
-   */
-  private getOpponentsForDisplay(): OpponentDisplayState[] {
-    if (!multiplayerGameManager.isMultiplayer()) {
-      return [];
-    }
-    return multiplayerGameManager.getOpponents();
-  }
+/** Row times holding 2+ playable notes (jumps, hands, quads) */
+function rowsWithJumps(notes: readonly Note[]): Set<number> {
+  const count = new Map<number, number>();
+  for (const n of notes) if (n.type !== 'mine') count.set(n.time, (count.get(n.time) ?? 0) + 1);
+  return new Set([...count].filter(([, c]) => c >= 2).map(([t]) => t));
 }

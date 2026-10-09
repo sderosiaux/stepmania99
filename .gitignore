@@ -35,3 +35,6 @@ public/songs/*
 !public/songs/.gitkeep
 !public/songs/_Mazu
 !public/songs/Virtual Test Lab
+# Linked _Mazu songs from a local StepMania/OutFox install; only Arcade is versioned
+public/songs/_Mazu/*
+!public/songs/_Mazu/Arcade

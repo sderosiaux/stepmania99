@@ -1,278 +1,371 @@
+import { OutputClock } from './clock';
+
 // ============================================================================
-// Audio Manager - Web Audio API wrapper for precise timing
+// Audio engine
+//
+// One AudioContext, three buses (music, sfx, voice) and one song timeline:
+//   songMs(ctxTime) = (ctxTime - songStartCtx) * 1000
+// The music source is started *on* that timeline, assist claps and announcer
+// cues are scheduled on it too, so they are sample-aligned with the music.
+// The game reads it through the output clock, i.e. as heard by the player.
 // ============================================================================
 
-export class AudioManager {
-  private context: AudioContext | null = null;
-  private currentBuffer: AudioBuffer | null = null;
-  private sourceNode: AudioBufferSourceNode | null = null;
-  private gainNode: GainNode | null = null;
+export type SfxId =
+  | 'ui-move' | 'ui-change' | 'ui-select' | 'ui-back' | 'ui-start'
+  | 'assist-clap' | 'mine-explode' | 'combo-break' | 'milestone' | 'fail' | 'clear-fanfare'
+  | 'grade-slam' | 'score-tick' | 'whoosh' | 'eliminated'
+  | 'vo-ready' | 'vo-go' | 'vo-full-combo' | 'vo-perfect-full-combo' | 'vo-marvelous-full-combo'
+  | 'vo-cleared' | 'vo-failed' | 'vo-new-record' | 'vo-combo-100' | 'vo-combo-200' | 'vo-combo-500'
+  | 'vo-grade-aaaa' | 'vo-grade-aaa' | 'vo-grade-aa' | 'vo-grade-a' | 'vo-grade-b' | 'vo-grade-c' | 'vo-grade-d'
+  | 'vo-welcome';
 
-  /** Time when playback started (in AudioContext time) */
-  private playStartTime: number = 0;
+interface SfxManifest {
+  assets: Record<string, { file: string; kind: 'sfx' | 'voice' }>;
+}
 
-  /** Offset into the audio when we started (for pause/resume) */
-  private pauseOffset: number = 0;
+const SCHEDULE_MARGIN_S = 0.03;
+/** -40 dBFS: first sample louder than this is the attack */
+const ONSET_THRESHOLD = 0.01;
+/** Only codec padding is skipped; longer quiet intros (the ui-start riser) are content */
+const MAX_PADDING_S = 0.03;
 
-  /** Is audio currently playing */
-  private _isPlaying: boolean = false;
-
-  /** Cache of loaded audio buffers */
-  private cache: Map<string, AudioBuffer> = new Map();
-
-  /** Duration for virtual (silent) songs in seconds */
-  private static readonly VIRTUAL_SONG_DURATION = 300; // 5 minutes
-
-  /**
-   * Initialize or resume the audio context
-   * Must be called after user interaction (browser policy)
-   */
-  async init(): Promise<void> {
-    if (!this.context) {
-      this.context = new AudioContext();
-    }
-
-    if (this.context.state === 'suspended') {
-      await this.context.resume();
-    }
-
-    // Create gain node for volume control
-    if (!this.gainNode) {
-      this.gainNode = this.context.createGain();
-      this.gainNode.connect(this.context.destination);
+/** Leading silence to skip (≤ 30 ms), whatever the decoder did with MP3 encoder delay */
+export function onsetSeconds(buffer: AudioBuffer): number {
+  let first = buffer.length;
+  for (let c = 0; c < buffer.numberOfChannels; c++) {
+    const data = buffer.getChannelData(c);
+    const limit = Math.min(first, data.length);
+    for (let i = 0; i < limit; i++) {
+      if (Math.abs(data[i]!) > ONSET_THRESHOLD) {
+        first = i;
+        break;
+      }
     }
   }
+  return first === buffer.length ? 0 : Math.min(MAX_PADDING_S, first / buffer.sampleRate);
+}
+const BASE = import.meta.env.BASE_URL;
 
-  /**
-   * Get the AudioContext (must be initialized first)
-   */
-  getContext(): AudioContext {
-    if (!this.context) {
-      throw new Error('AudioManager not initialized. Call init() first.');
+export class AudioEngine {
+  private ctx: AudioContext | null = null;
+  private clock: OutputClock | null = null;
+  private buses: { master: GainNode; music: GainNode; duck: GainNode; sfx: GainNode; voice: GainNode } | null = null;
+
+  private musicCache = new Map<string, Promise<AudioBuffer>>();
+  private sfx = new Map<string, { buffer: AudioBuffer; kind: 'sfx' | 'voice'; onset: number }>();
+  private sfxLoading: Promise<void> | null = null;
+
+  // Song timeline
+  private song: AudioBuffer | null = null;
+  private songSource: AudioBufferSourceNode | null = null;
+  private songGain: GainNode | null = null;
+  private songStartCtx = 0;
+  /** Music rate: song ms advance `rate` times faster than real ms */
+  private rate = 1;
+  private pausedAtMs: number | null = null;
+  private scheduled: AudioBufferSourceNode[] = [];
+
+  // Preview
+  private preview: { source: AudioBufferSourceNode; gain: GainNode; url: string; startCtx: number; start: number; end: number } | null = null;
+  private previewToken = 0;
+
+  /** Create/resume the context. Call from a user gesture at least once. */
+  async unlock(): Promise<void> {
+    if (!this.ctx) {
+      this.ctx = new AudioContext({ latencyHint: 'interactive' });
+      this.clock = new OutputClock(this.ctx);
+      const master = this.ctx.createGain();
+      const music = this.ctx.createGain();
+      const duck = this.ctx.createGain();
+      const sfx = this.ctx.createGain();
+      const voice = this.ctx.createGain();
+      music.connect(duck).connect(master);
+      sfx.connect(master);
+      voice.connect(master);
+      master.connect(this.ctx.destination);
+      this.buses = { master, music, duck, sfx, voice };
     }
-    return this.context;
+    if (this.ctx.state === 'suspended') await this.ctx.resume();
   }
 
-  /**
-   * Create a silent audio buffer for virtual songs
-   * @param duration - Duration in seconds
-   */
-  private createSilentBuffer(duration: number): AudioBuffer {
-    if (!this.context) {
-      throw new Error('AudioManager not initialized');
-    }
-
-    const sampleRate = this.context.sampleRate;
-    const numSamples = Math.floor(sampleRate * duration);
-    const buffer = this.context.createBuffer(2, numSamples, sampleRate);
-
-    // Buffer is already filled with zeros (silence)
-    return buffer;
+  get context(): AudioContext {
+    if (!this.ctx) throw new Error('AudioEngine not unlocked');
+    return this.ctx;
   }
 
-  /**
-   * Check if a URL points to a virtual (no audio) song
-   */
-  private isVirtualSong(url: string): boolean {
-    return url.endsWith('/virtual') || url.endsWith('virtual.mp3') || url.endsWith('virtual.ogg');
+  get ready(): boolean {
+    return this.ctx?.state === 'running';
   }
 
-  /**
-   * Load an audio file
-   * @param url - URL or path to the audio file
-   * @returns Promise that resolves when loaded
-   */
-  async load(url: string): Promise<void> {
-    // Check cache
-    if (this.cache.has(url)) {
-      this.currentBuffer = this.cache.get(url)!;
-      return;
-    }
-
-    await this.init();
-
-    // Handle virtual songs (no actual audio file)
-    if (this.isVirtualSong(url)) {
-      const silentBuffer = this.createSilentBuffer(AudioManager.VIRTUAL_SONG_DURATION);
-      this.cache.set(url, silentBuffer);
-      this.currentBuffer = silentBuffer;
-      console.log(`Loaded virtual song with ${AudioManager.VIRTUAL_SONG_DURATION}s silent audio`);
-      return;
-    }
-
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error(`Failed to load audio: ${url} (${response.status})`);
-    }
-
-    const arrayBuffer = await response.arrayBuffer();
-    const audioBuffer = await this.context!.decodeAudioData(arrayBuffer);
-
-    // Cache the buffer
-    this.cache.set(url, audioBuffer);
-    this.currentBuffer = audioBuffer;
+  setVolumes(v: { music: number; sfx: number; voice: number }): void {
+    if (!this.buses) return;
+    this.buses.music.gain.value = v.music;
+    this.buses.sfx.gain.value = v.sfx;
+    this.buses.voice.gain.value = v.voice;
   }
 
-  /**
-   * Start playback
-   * @param offset - Start position in seconds (default 0)
-   */
-  play(offset: number = 0): void {
-    if (!this.context || !this.currentBuffer || !this.gainNode) {
-      throw new Error('Audio not loaded');
-    }
+  // --------------------------------------------------------------------------
+  // Loading
+  // --------------------------------------------------------------------------
 
-    // Stop any existing playback
+  loadMusic(url: string): Promise<AudioBuffer> {
+    let p = this.musicCache.get(url);
+    if (!p) {
+      p = (async () => {
+        await this.unlock();
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`Failed to load ${url} (${res.status})`);
+        return this.context.decodeAudioData(await res.arrayBuffer());
+      })();
+      p.catch(() => this.musicCache.delete(url));
+      this.musicCache.set(url, p);
+    }
+    return p;
+  }
+
+  loadSfx(): Promise<void> {
+    if (!this.sfxLoading) {
+      this.sfxLoading = (async () => {
+        await this.unlock();
+        const res = await fetch(`${BASE}sfx/manifest.json`);
+        if (!res.ok) {
+          console.warn('No SFX manifest — playing without sound effects');
+          return;
+        }
+        const manifest = (await res.json()) as SfxManifest;
+        await Promise.all(
+          Object.entries(manifest.assets).map(async ([id, a]) => {
+            try {
+              const r = await fetch(`${BASE}sfx/${a.file}`);
+              const buffer = await this.context.decodeAudioData(await r.arrayBuffer());
+              this.sfx.set(id, { buffer, kind: a.kind, onset: onsetSeconds(buffer) });
+            } catch (e) {
+              console.warn(`SFX ${id} failed to load`, e);
+            }
+          })
+        );
+      })();
+    }
+    return this.sfxLoading;
+  }
+
+  // --------------------------------------------------------------------------
+  // Song timeline
+  // --------------------------------------------------------------------------
+
+  /** Prepare a song (null = silent clock only) at a music rate (pitch follows the rate) */
+  setSong(buffer: AudioBuffer | null, rate = 1): void {
+    this.stopSong();
+    this.song = buffer;
+    this.rate = rate;
+    this.pausedAtMs = null;
+    this.clock?.reset();
+  }
+
+  /** Start the timeline so that song time `fromMs` is heard ~now. Negative = lead-in before the music. */
+  play(fromMs: number, fadeInMs = 0): void {
+    const ctx = this.context;
     this.stopSource();
+    const when = ctx.currentTime + SCHEDULE_MARGIN_S;
+    this.songStartCtx = when - fromMs / 1000 / this.rate;
+    this.pausedAtMs = null;
 
-    // Create new source
-    this.sourceNode = this.context.createBufferSource();
-    this.sourceNode.buffer = this.currentBuffer;
-    this.sourceNode.connect(this.gainNode);
+    if (!this.song) return;
+    const source = ctx.createBufferSource();
+    source.buffer = this.song;
+    source.playbackRate.value = this.rate;
+    const gain = ctx.createGain();
+    source.connect(gain).connect(this.buses!.music);
+    if (fadeInMs > 0) {
+      gain.gain.setValueAtTime(0, Math.max(when, this.songStartCtx));
+      gain.gain.linearRampToValueAtTime(1, Math.max(when, this.songStartCtx) + fadeInMs / 1000);
+    }
+    if (fromMs >= 0) source.start(when, fromMs / 1000);
+    else source.start(this.songStartCtx, 0);
+    this.songSource = source;
+    this.songGain = gain;
+  }
 
-    // Track timing
-    this.playStartTime = this.context.currentTime;
-    this.pauseOffset = offset;
+  /** Arcade "power down": pitch and volume dive to zero. The timeline is meaningless afterwards. */
+  tapeStop(seconds = 1.4): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.songSource || !this.songGain) return;
+    const now = ctx.currentTime;
+    this.songSource.playbackRate.setValueAtTime(this.rate, now);
+    this.songSource.playbackRate.exponentialRampToValueAtTime(0.05, now + seconds);
+    this.songGain.gain.setValueAtTime(this.songGain.gain.value, now);
+    this.songGain.gain.linearRampToValueAtTime(0, now + seconds);
+  }
 
-    // Start playback
-    this.sourceNode.start(0, offset);
-    this._isPlaying = true;
+  /** Fade the music out (song end, quit) */
+  fadeOut(seconds = 0.8): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.songGain) return;
+    const now = ctx.currentTime;
+    this.songGain.gain.setValueAtTime(this.songGain.gain.value, now);
+    this.songGain.gain.linearRampToValueAtTime(0, now + seconds);
+  }
 
-    // Handle natural end of playback
-    this.sourceNode.onended = () => {
-      this._isPlaying = false;
+  pause(atMs: number): void {
+    this.stopSource();
+    this.pausedAtMs = atMs;
+  }
+
+  stopSong(): void {
+    this.stopSource();
+    this.pausedAtMs = null;
+  }
+
+  private stopSource(): void {
+    for (const s of this.scheduled) {
+      try {
+        s.stop();
+      } catch {
+        /* not started */
+      }
+    }
+    this.scheduled = [];
+    if (this.songSource) {
+      try {
+        this.songSource.stop();
+      } catch {
+        /* already stopped */
+      }
+      this.songSource.disconnect();
+      this.songGain?.disconnect();
+      this.songSource = null;
+      this.songGain = null;
+    }
+  }
+
+  /** Call once per frame before reading time */
+  sync(): void {
+    this.clock?.update();
+  }
+
+  /** Song time (ms, audio-file timeline) heard at `perfMs` */
+  songTimeAt(perfMs: number): number {
+    if (this.pausedAtMs !== null) return this.pausedAtMs;
+    if (!this.clock) return 0;
+    return (this.clock.ctxTimeAt(perfMs) - this.songStartCtx) * 1000 * this.rate;
+  }
+
+  /** Song time at the AudioContext's scheduling clock (ahead of what is heard) */
+  scheduledSongTimeMs(): number {
+    if (!this.ctx || this.pausedAtMs !== null) return this.pausedAtMs ?? 0;
+    return (this.ctx.currentTime - this.songStartCtx) * 1000 * this.rate;
+  }
+
+  get songDurationMs(): number {
+    return this.song ? this.song.duration * 1000 : 0;
+  }
+
+  /** Schedule a sample exactly at a song time (assist clap, announcer cue). Cancelled by pause/stop. */
+  scheduleAt(id: SfxId, songMs: number, gain = 1): void {
+    const ctx = this.ctx;
+    const entry = this.sfx.get(id);
+    if (!ctx || !entry || this.pausedAtMs !== null) return;
+    const when = this.songStartCtx + songMs / 1000 / this.rate;
+    if (when < ctx.currentTime) return;
+    const src = this.makeSource(entry, gain);
+    // Start at the measured attack: decoders disagree on MP3 encoder delay (~25 ms)
+    src.start(when, entry.onset);
+    this.scheduled.push(src);
+    src.onended = () => {
+      this.scheduled = this.scheduled.filter((s) => s !== src);
     };
   }
 
-  /**
-   * Pause playback
-   */
-  pause(): void {
-    if (!this._isPlaying) return;
+  // --------------------------------------------------------------------------
+  // One-shots
+  // --------------------------------------------------------------------------
 
-    // Save current position
-    this.pauseOffset = this.getCurrentTime();
-
-    // Stop the source
-    this.stopSource();
-    this._isPlaying = false;
+  play1(id: SfxId, opts: { gain?: number; rate?: number; duck?: boolean } = {}): void {
+    const ctx = this.ctx;
+    const entry = this.sfx.get(id);
+    if (!ctx || ctx.state !== 'running' || !entry) return;
+    const src = this.makeSource(entry, opts.gain ?? 1);
+    if (opts.rate) src.playbackRate.value = opts.rate;
+    src.start(0, entry.onset);
+    if (opts.duck) this.duck(entry.buffer.duration);
   }
 
-  /**
-   * Resume playback from paused position
-   */
-  resume(): void {
-    if (this._isPlaying) return;
-    this.play(this.pauseOffset);
+  has(id: SfxId): boolean {
+    return this.sfx.has(id);
   }
 
-  /**
-   * Stop playback completely
-   */
-  stop(): void {
-    this.stopSource();
-    this.pauseOffset = 0;
-    this._isPlaying = false;
+  private makeSource(entry: { buffer: AudioBuffer; kind: 'sfx' | 'voice'; onset: number }, gain: number): AudioBufferSourceNode {
+    const ctx = this.context;
+    const src = ctx.createBufferSource();
+    src.buffer = entry.buffer;
+    const g = ctx.createGain();
+    g.gain.value = gain;
+    src.connect(g).connect(entry.kind === 'voice' ? this.buses!.voice : this.buses!.sfx);
+    return src;
   }
 
-  /**
-   * Internal: stop the source node
-   */
-  private stopSource(): void {
-    if (this.sourceNode) {
-      try {
-        this.sourceNode.stop();
-      } catch {
-        // Already stopped
-      }
-      this.sourceNode.disconnect();
-      this.sourceNode = null;
+  /** Dip the music under an announcer line */
+  private duck(seconds: number): void {
+    const g = this.buses!.duck.gain;
+    const now = this.context.currentTime;
+    g.cancelScheduledValues(now);
+    g.setTargetAtTime(0.55, now, 0.03);
+    g.setTargetAtTime(1, now + seconds, 0.15);
+  }
+
+  // --------------------------------------------------------------------------
+  // Song-select preview: looped excerpt with fades, independent from the song timeline
+  // --------------------------------------------------------------------------
+
+  async playPreview(url: string, startSec: number, lengthSec: number): Promise<void> {
+    const token = ++this.previewToken;
+    if (this.preview?.url === url) return;
+    this.stopPreview();
+    let buffer: AudioBuffer;
+    try {
+      buffer = await this.loadMusic(url);
+    } catch {
+      return;
     }
+    if (token !== this.previewToken || !this.ctx) return;
+    const ctx = this.ctx;
+    const start = Math.min(Math.max(0, startSec), Math.max(0, buffer.duration - 1));
+    const end = Math.min(buffer.duration, start + Math.max(4, lengthSec));
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.loop = true;
+    source.loopStart = start;
+    source.loopEnd = end;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0, ctx.currentTime);
+    gain.gain.linearRampToValueAtTime(0.8, ctx.currentTime + 0.6);
+    source.connect(gain).connect(this.buses!.music);
+    const startCtx = ctx.currentTime + SCHEDULE_MARGIN_S;
+    source.start(startCtx, start);
+    this.preview = { source, gain, url, startCtx, start, end };
   }
 
-  /**
-   * Get current playback time in seconds
-   */
-  getCurrentTime(): number {
-    if (!this.context || !this._isPlaying) {
-      return this.pauseOffset;
-    }
-    return this.pauseOffset + (this.context.currentTime - this.playStartTime);
+  /** Position (ms, audio-file timeline) of the preview heard at `perfMs`, or null */
+  previewTimeAt(perfMs: number): number | null {
+    const p = this.preview;
+    if (!p || !this.clock) return null;
+    const elapsed = this.clock.ctxTimeAt(perfMs) - p.startCtx;
+    if (elapsed < 0) return null;
+    const loop = p.end - p.start;
+    return (p.start + (elapsed % loop)) * 1000;
   }
 
-  /**
-   * Get current playback time in milliseconds
-   */
-  getCurrentTimeMs(): number {
-    return this.getCurrentTime() * 1000;
-  }
-
-  /**
-   * Get the audio context's current time (for sync)
-   */
-  getContextTime(): number {
-    return this.context?.currentTime ?? 0;
-  }
-
-  /**
-   * Check if audio is playing
-   */
-  get isPlaying(): boolean {
-    return this._isPlaying;
-  }
-
-  /**
-   * Get the duration of the loaded audio in seconds
-   */
-  getDuration(): number {
-    return this.currentBuffer?.duration ?? 0;
-  }
-
-  /**
-   * Get the duration in milliseconds
-   */
-  getDurationMs(): number {
-    return this.getDuration() * 1000;
-  }
-
-  /**
-   * Set volume (0 to 1)
-   */
-  setVolume(volume: number): void {
-    if (this.gainNode) {
-      this.gainNode.gain.value = Math.max(0, Math.min(1, volume));
-    }
-  }
-
-  /**
-   * Get current volume
-   */
-  getVolume(): number {
-    return this.gainNode?.gain.value ?? 1;
-  }
-
-  /**
-   * Clean up resources
-   */
-  dispose(): void {
-    this.stop();
-    this.cache.clear();
-    this.currentBuffer = null;
-
-    if (this.gainNode) {
-      this.gainNode.disconnect();
-      this.gainNode = null;
-    }
-
-    if (this.context) {
-      this.context.close();
-      this.context = null;
-    }
+  stopPreview(fadeMs = 250): void {
+    this.previewToken++;
+    const p = this.preview;
+    if (!p || !this.ctx) return;
+    this.preview = null;
+    const now = this.ctx.currentTime;
+    p.gain.gain.cancelScheduledValues(now);
+    p.gain.gain.setValueAtTime(p.gain.gain.value, now);
+    p.gain.gain.linearRampToValueAtTime(0, now + fadeMs / 1000);
+    p.source.stop(now + fadeMs / 1000 + 0.02);
   }
 }
 
-// ============================================================================
-// Singleton Instance
-// ============================================================================
-
-export const audioManager = new AudioManager();
+export const audio = new AudioEngine();

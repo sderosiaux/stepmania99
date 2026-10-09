@@ -1,0 +1,176 @@
+{
+  "version": 1,
+  "voiceId": "pNInz6obpgDQGcFmaJgB",
+  "assets": {
+    "ui-move": {
+      "file": "ui-move.mp3",
+      "kind": "sfx",
+      "durationMs": 60
+    },
+    "ui-change": {
+      "file": "ui-change.mp3",
+      "kind": "sfx",
+      "durationMs": 140
+    },
+    "ui-select": {
+      "file": "ui-select.mp3",
+      "kind": "sfx",
+      "durationMs": 350
+    },
+    "ui-back": {
+      "file": "ui-back.mp3",
+      "kind": "sfx",
+      "durationMs": 280
+    },
+    "ui-start": {
+      "file": "ui-start.mp3",
+      "kind": "sfx",
+      "durationMs": 1500
+    },
+    "assist-clap": {
+      "file": "assist-clap.mp3",
+      "kind": "sfx",
+      "durationMs": 80
+    },
+    "mine-explode": {
+      "file": "mine-explode.mp3",
+      "kind": "sfx",
+      "durationMs": 450
+    },
+    "combo-break": {
+      "file": "combo-break.mp3",
+      "kind": "sfx",
+      "durationMs": 450
+    },
+    "milestone": {
+      "file": "milestone.mp3",
+      "kind": "sfx",
+      "durationMs": 800
+    },
+    "fail": {
+      "file": "fail.mp3",
+      "kind": "sfx",
+      "durationMs": 2000
+    },
+    "clear-fanfare": {
+      "file": "clear-fanfare.mp3",
+      "kind": "sfx",
+      "durationMs": 2480
+    },
+    "grade-slam": {
+      "file": "grade-slam.mp3",
+      "kind": "sfx",
+      "durationMs": 800
+    },
+    "score-tick": {
+      "file": "score-tick.mp3",
+      "kind": "sfx",
+      "durationMs": 50
+    },
+    "whoosh": {
+      "file": "whoosh.mp3",
+      "kind": "sfx",
+      "durationMs": 450
+    },
+    "eliminated": {
+      "file": "eliminated.mp3",
+      "kind": "sfx",
+      "durationMs": 680
+    },
+    "vo-ready": {
+      "file": "vo-ready.mp3",
+      "kind": "voice",
+      "durationMs": 937
+    },
+    "vo-go": {
+      "file": "vo-go.mp3",
+      "kind": "voice",
+      "durationMs": 942
+    },
+    "vo-full-combo": {
+      "file": "vo-full-combo.mp3",
+      "kind": "voice",
+      "durationMs": 1338
+    },
+    "vo-perfect-full-combo": {
+      "file": "vo-perfect-full-combo.mp3",
+      "kind": "voice",
+      "durationMs": 1910
+    },
+    "vo-marvelous-full-combo": {
+      "file": "vo-marvelous-full-combo.mp3",
+      "kind": "voice",
+      "durationMs": 1883
+    },
+    "vo-cleared": {
+      "file": "vo-cleared.mp3",
+      "kind": "voice",
+      "durationMs": 1195
+    },
+    "vo-failed": {
+      "file": "vo-failed.mp3",
+      "kind": "voice",
+      "durationMs": 1269
+    },
+    "vo-new-record": {
+      "file": "vo-new-record.mp3",
+      "kind": "voice",
+      "durationMs": 968
+    },
+    "vo-combo-100": {
+      "file": "vo-combo-100.mp3",
+      "kind": "voice",
+      "durationMs": 1909
+    },
+    "vo-combo-200": {
+      "file": "vo-combo-200.mp3",
+      "kind": "voice",
+      "durationMs": 1436
+    },
+    "vo-combo-500": {
+      "file": "vo-combo-500.mp3",
+      "kind": "voice",
+      "durationMs": 1823
+    },
+    "vo-grade-aaaa": {
+      "file": "vo-grade-aaaa.mp3",
+      "kind": "voice",
+      "durationMs": 1801
+    },
+    "vo-grade-aaa": {
+      "file": "vo-grade-aaa.mp3",
+      "kind": "voice",
+      "durationMs": 1760
+    },
+    "vo-grade-aa": {
+      "file": "vo-grade-aa.mp3",
+      "kind": "voice",
+      "durationMs": 1073
+    },
+    "vo-grade-a": {
+      "file": "vo-grade-a.mp3",
+      "kind": "voice",
+      "durationMs": 941
+    },
+    "vo-grade-b": {
+      "file": "vo-grade-b.mp3",
+      "kind": "voice",
+      "durationMs": 1467
+    },
+    "vo-grade-c": {
+      "file": "vo-grade-c.mp3",
+      "kind": "voice",
+      "durationMs": 643
+    },
+    "vo-grade-d": {
+      "file": "vo-grade-d.mp3",
+      "kind": "voice",
+      "durationMs": 1080
+    },
+    "vo-welcome": {
+      "file": "vo-welcome.mp3",
+      "kind": "voice",
+      "durationMs": 2133
+    }
+  }
+}

@@ -201,7 +201,7 @@ describe('Multiplayer Server - Host Navigation', () => {
 
       expect(response.room.code).toHaveLength(8); // Room codes are now 8 chars for better security
       expect(response.room.players).toHaveLength(1);
-      expect(response.room.players[0].isHost).toBe(true);
+      expect(response.room.players[0]!.isHost).toBe(true);
       expect(response.playerId).toBeDefined();
 
       ws.close();

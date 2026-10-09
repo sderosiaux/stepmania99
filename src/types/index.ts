@@ -2,39 +2,40 @@
 // Core Game Types
 // ============================================================================
 
-/** Arrow directions matching keyboard layout */
+/** Arrow directions, in lane order */
 export type Direction = 'left' | 'down' | 'up' | 'right';
 
-/** All possible directions as array for iteration */
 export const DIRECTIONS: readonly Direction[] = ['left', 'down', 'up', 'right'] as const;
 
-/** Map keyboard keys to directions */
+/** Physical key → lane. Several keys may map to one lane; held state is tracked per key. */
 export const KEY_TO_DIRECTION: Record<string, Direction> = {
-  // Arrow keys
   ArrowLeft: 'left',
   ArrowDown: 'down',
   ArrowUp: 'up',
   ArrowRight: 'right',
-  // SDKL keys (split keyboard layout)
-  KeyS: 'left',
-  KeyD: 'down',
-  KeyK: 'up',
-  KeyL: 'right',
+  KeyD: 'left',
+  KeyF: 'down',
+  KeyJ: 'up',
+  KeyK: 'right',
 };
 
-/** Difficulty levels */
 export type Difficulty = 'Beginner' | 'Easy' | 'Medium' | 'Hard' | 'Challenge';
 
-/** Judgment grades from best to worst */
+/** Tap judgments, best to worst */
 export type JudgmentGrade = 'marvelous' | 'perfect' | 'great' | 'good' | 'boo' | 'miss';
+export const JUDGMENT_GRADES: readonly JudgmentGrade[] = ['marvelous', 'perfect', 'great', 'good', 'boo', 'miss'];
 
-/** Letter grades for final score */
-export type LetterGrade = 'AAAA' | 'AAA' | 'AA' | 'A' | 'B' | 'C' | 'D';
+/** Freeze/roll outcome */
+export type HoldGrade = 'ok' | 'ng';
+
+/** E = failed (lifebar emptied) */
+export type LetterGrade = 'AAAA' | 'AAA' | 'AA' | 'A' | 'B' | 'C' | 'D' | 'E';
 
 // ============================================================================
-// Timing Windows (in milliseconds)
+// Timing rules (StepMania "J4" windows, DDR scoring semantics)
 // ============================================================================
 
+/** Half-width of each tap window in ms */
 export const TIMING_WINDOWS: Record<Exclude<JudgmentGrade, 'miss'>, number> = {
   marvelous: 22.5,
   perfect: 45,
@@ -43,7 +44,14 @@ export const TIMING_WINDOWS: Record<Exclude<JudgmentGrade, 'miss'>, number> = {
   boo: 180,
 };
 
-/** Score percentages for each judgment */
+/** A released freeze survives this long before it is NG (StepMania TimingWindowSecondsHold) */
+export const HOLD_RELEASE_WINDOW_MS = 250;
+/** A roll must be re-tapped at least this often (StepMania TimingWindowSecondsRoll) */
+export const ROLL_TAP_WINDOW_MS = 500;
+/** A mine explodes if its lane is pressed within, or held across, this window */
+export const MINE_WINDOW_MS = 90;
+
+/** Score weight per tap judgment (out of 100) */
 export const JUDGMENT_SCORES: Record<JudgmentGrade, number> = {
   marvelous: 100,
   perfect: 98,
@@ -53,29 +61,42 @@ export const JUDGMENT_SCORES: Record<JudgmentGrade, number> = {
   miss: 0,
 };
 
-/** Whether judgment maintains combo */
+/** DDR EX score weights */
+export const EX_SCORES: Record<JudgmentGrade | HoldGrade, number> = {
+  marvelous: 3,
+  perfect: 2,
+  great: 1,
+  good: 0,
+  boo: 0,
+  miss: 0,
+  ok: 3,
+  ng: 0,
+};
+
+/** Great or better keeps the combo (StepMania default MinScoreToContinueCombo = W3) */
 export const JUDGMENT_MAINTAINS_COMBO: Record<JudgmentGrade, boolean> = {
   marvelous: true,
   perfect: true,
   great: true,
-  good: false,  // Good breaks combo
+  good: false,
   boo: false,
   miss: false,
 };
 
-/** Health change for each judgment (positive = gain, negative = lose) */
-export const JUDGMENT_HEALTH: Record<JudgmentGrade, number> = {
-  marvelous: 2.0,
-  perfect: 1.5,
+/** Lifebar delta in percentage points */
+export const LIFE_DELTA: Record<JudgmentGrade | HoldGrade | 'mine', number> = {
+  marvelous: 1,
+  perfect: 1,
   great: 0.5,
-  good: -2.5,
-  boo: -6.0,
-  miss: -10.0,
+  good: 0,
+  boo: -5,
+  miss: -10,
+  ok: 1,
+  ng: -8,
+  mine: -10,
 };
 
-/** Grade thresholds (percentage required) */
 export const GRADE_THRESHOLDS: { grade: LetterGrade; threshold: number }[] = [
-  { grade: 'AAA', threshold: 100 },
   { grade: 'AA', threshold: 93 },
   { grade: 'A', threshold: 80 },
   { grade: 'B', threshold: 65 },
@@ -84,240 +105,200 @@ export const GRADE_THRESHOLDS: { grade: LetterGrade; threshold: number }[] = [
 ];
 
 // ============================================================================
-// Data Structures
+// Chart data (immutable once parsed)
 // ============================================================================
 
-/** Note type */
-export type NoteType = 'tap' | 'hold';
+export type NoteType = 'tap' | 'hold' | 'roll' | 'mine';
 
-/** A single note/arrow in the chart */
 export interface Note {
-  /** Unique ID for this note */
-  id: number;
-  /** Time in milliseconds from song start */
-  time: number;
-  /** Beat position (e.g., 0, 0.25, 0.5, 0.75 for quarter notes) */
-  beat?: number;
-  /** Arrow direction */
-  direction: Direction;
-  /** Note type (tap or hold/freeze) */
-  type: NoteType;
-  /** Duration in ms (for hold notes only) */
-  duration?: number;
-  /** End time in ms (for hold notes: time + duration) */
-  endTime?: number;
-  /** Whether this note has been judged */
-  judged: boolean;
-  /** The judgment received (if judged) */
-  judgment?: Judgment;
-  /** Hold state (for freeze arrows) */
-  holdState?: HoldState;
+  readonly id: number;
+  /** Ms on the audio-file timeline (0 = first sample of the music file) */
+  readonly time: number;
+  readonly beat: number;
+  readonly direction: Direction;
+  readonly lane: number;
+  readonly type: NoteType;
+  /** Hold/roll tail, same timeline as `time` */
+  readonly endTime?: number;
+  readonly endBeat?: number;
+  /** Rhythmic quantization of the row: 4, 8, 12, 16, 24, 32, 48, 64 or 192 */
+  readonly quant: number;
+  /** Multiplayer: injected by a rival's combo */
+  readonly attackFrom?: string;
 }
 
-/** State of a hold/freeze note */
-export interface HoldState {
-  /** Is the hold currently being held */
-  isHeld: boolean;
-  /** Has the hold been started (head hit) */
-  started: boolean;
-  /** Has the hold been completed successfully */
-  completed: boolean;
-  /** Has the hold been dropped/failed */
-  dropped: boolean;
-  /** Progress through the hold (0-1) */
-  progress: number;
-}
-
-/** Result of judging a note */
-export interface Judgment {
-  /** The note that was judged */
-  noteId: number;
-  /** Timing difference in ms (negative = early, positive = late) */
-  timingDiff: number;
-  /** The grade received */
-  grade: JudgmentGrade;
-  /** Time when judgment occurred */
-  time: number;
-}
-
-/** A single difficulty chart */
 export interface Chart {
-  /** Difficulty name */
   difficulty: Difficulty;
-  /** Numeric difficulty level (1-20) */
   level: number;
-  /** All notes in this chart, sorted by time */
-  notes: Note[];
+  /** Sorted by time, then lane */
+  notes: readonly Note[];
+  /** Chart-specific timing (SSC charts may override song timing) */
+  timing: TimingSource;
+  /** Normalized groove radar (stream, voltage, air, freeze, chaos) 0..1 when the file provides one */
+  radar?: number[];
 }
 
-/** BPM change event */
 export interface BpmChange {
-  /** Beat number where BPM changes */
   beat: number;
-  /** New BPM value */
   bpm: number;
 }
 
-/** Stop/freeze event (song pauses but notes continue) */
+/** Freeze after the notes on `beat` */
 export interface Stop {
-  /** Beat number where stop occurs */
   beat: number;
-  /** Duration of stop in seconds */
+  /** Seconds */
   duration: number;
 }
 
-/** Complete song data */
-export interface Song {
-  /** Unique identifier */
-  id: string;
-  /** Song title */
-  title: string;
-  /** Artist name */
-  artist: string;
-  /** Beats per minute (initial BPM, or only BPM if no changes) */
-  bpm: number;
-  /** Audio offset in milliseconds */
-  offset: number;
-  /** Path to music file */
-  musicFile: string;
-  /** Preview start time in seconds */
-  previewStart: number;
-  /** Available charts */
-  charts: Chart[];
-  /** Song pack/folder name */
-  pack?: string;
-  /** BPM changes throughout the song (optional, for variable BPM songs) */
-  bpmChanges?: BpmChange[];
-  /** Stops/freezes in the song (optional) */
-  stops?: Stop[];
-  /** Base path for loading audio/assets (for .sm files) */
-  basePath?: string;
-  /** Banner image path */
-  banner?: string;
-  /** Background image path */
-  background?: string;
+/** Raw timing tags, as authored in the simfile */
+export interface TimingSource {
+  /** Ms on the audio timeline where beat 0 lands (= -#OFFSET * 1000) */
+  beat0Ms: number;
+  bpms: BpmChange[];
+  stops: Stop[];
+  /** Freeze before the notes on `beat` */
+  delays: Stop[];
 }
 
-/** Song pack/folder containing songs */
+export interface Song {
+  id: string;
+  title: string;
+  subtitle?: string;
+  artist: string;
+  /** Display BPM (first BPM) */
+  bpm: number;
+  musicFile: string;
+  /** Seconds */
+  previewStart: number;
+  previewLength: number;
+  charts: Chart[];
+  pack?: string;
+  timing: TimingSource;
+  basePath?: string;
+  banner?: string;
+  background?: string;
+  /** Square cover art (.ssc #JACKET) */
+  jacket?: string;
+  /** True when the simfile has no audio (`#MUSIC:virtual;`) — runs on a silent clock */
+  silent?: boolean;
+}
+
 export interface SongPack {
-  /** Pack name */
   name: string;
-  /** Songs in this pack */
   songs: Song[];
 }
 
 // ============================================================================
-// Input Types
+// Input
 // ============================================================================
 
-/** A buffered input event */
 export interface InputEvent {
-  /** Direction pressed */
   direction: Direction;
-  /** High-resolution timestamp (performance.now()) */
+  /** performance.now() timeline (KeyboardEvent.timeStamp / Gamepad.timestamp) */
   timestamp: number;
-  /** Whether key is being pressed (true) or released (false) */
   pressed: boolean;
 }
 
 // ============================================================================
-// Game State Types
+// Screens / results
 // ============================================================================
 
-/** Current screen in the game */
-export type GameScreen = 'loading' | 'song-select' | 'gameplay' | 'results' | 'settings';
+export type GameScreen = 'loading' | 'song-select' | 'gameplay' | 'results' | 'calibration';
 
-/** State during gameplay */
-export interface GameplayState {
-  /** Current song */
-  song: Song;
-  /** Selected chart */
-  chart: Chart;
-  /** Active notes (not yet judged) */
-  activeNotes: Note[];
-  /** All judgments made */
-  judgments: Judgment[];
-  /** Current score (0-1000000) */
-  score: number;
-  /** Current combo */
-  combo: number;
-  /** Max combo achieved */
-  maxCombo: number;
-  /** Game start time (AudioContext.currentTime when started) */
-  startTime: number;
-  /** Is game paused */
-  paused: boolean;
-  /** Has song ended */
-  ended: boolean;
-}
-
-/** Per-direction statistics */
 export interface DirectionStats {
-  /** Number of notes hit in this direction */
   count: number;
-  /** Average timing offset (negative = early, positive = late) */
   avgTiming: number;
-  /** All timing offsets for this direction */
   timings: number[];
 }
 
-/** Results after completing a song */
+export interface HitSample {
+  /** Real ms, + = late */
+  offset: number;
+  quant: number;
+  /** Part of a jump/hand (2+ notes on the row) */
+  jump: boolean;
+  lane: number;
+}
+
+export interface ErrorMark {
+  /** Song time (ms) */
+  time: number;
+  kind: 'miss' | 'boo' | 'good' | 'ng' | 'mine';
+}
+
 export interface ResultsData {
-  /** The song played */
   song: Song;
-  /** The chart played */
   chart: Chart;
-  /** Final score */
+  /** 0..1,000,000 */
   score: number;
-  /** Final grade */
+  exScore: number;
+  maxExScore: number;
   grade: LetterGrade;
-  /** Max combo */
   maxCombo: number;
-  /** Judgment counts */
   judgmentCounts: Record<JudgmentGrade, number>;
-  /** Total notes */
+  holdCounts: Record<HoldGrade, number>;
+  minesHit: number;
   totalNotes: number;
-  /** Percentage (0-100) */
+  /** 0..100 */
   percentage: number;
-  /** Whether the player failed (lifebar depleted) */
-  failed?: boolean;
-  /** Whether the player achieved a full combo (no good/boo/miss) */
+  failed: boolean;
+  /** No good/boo/miss, no NG, no mine hit */
   isFullCombo: boolean;
-  /** Per-direction timing stats */
-  directionStats?: Record<Direction, DirectionStats>;
+  /** Signed offsets (ms, + = late) of every non-miss tap */
+  offsets: number[];
+  /** Every non-miss tap with its context, for the precision breakdown */
+  hits: HitSample[];
+  /** Miss / boo / good / N.G. / mine, with their song time — the error heatmap */
+  errors: ErrorMark[];
+  /** Points lost (0..1,000,000 scale) at each 1% of the chart judged — the pacemaker reference */
+  lossCurve: number[];
+  /** Music rate the run was played at (≠ 1 is practice: not saved as a record) */
+  rate: number;
+  /** Life after each judgment, with its song time */
+  lifeHistory: { time: number; life: number }[];
+  directionStats: Record<Direction, DirectionStats>;
+  autoplay: boolean;
 }
 
-/** Note skin styles */
-export type NoteSkin = 'arrows' | 'gems';
+// ============================================================================
+// Settings
+// ============================================================================
 
-/** Available note skins */
-export const NOTE_SKINS: readonly NoteSkin[] = ['arrows', 'gems'] as const;
+export type Perspective = 'flat' | 'tilted';
 
-/** User settings */
 export interface Settings {
-  /** Audio offset in ms (positive = audio plays later) */
-  audioOffset: number;
-  /** Visual offset in ms (positive = arrows appear later) */
-  visualOffset: number;
-  /** Scroll speed multiplier (legacy, used if cmod is 0) */
-  scrollSpeed: number;
-  /** CMod speed - constant scroll speed in pixels/second (0 = use BPM-based) */
+  /** Global offset in ms: + means you hear the music later than the game assumes */
+  offsetMs: number;
+  /** Constant scroll speed, StepMania C-mod units (arrow pixels per second at 480p) */
   cmod: number;
-  /** Background dim (0-1) */
-  backgroundDim: number;
-  /** Note skin style */
-  noteSkin: NoteSkin;
+  perspective: Perspective;
+  /** Clap on every note, scheduled on the audio clock — also the quickest way to check sync */
+  assistTick: boolean;
+  musicVolume: number;
+  sfxVolume: number;
+  voiceVolume: number;
+  /** Music rate for practice (pitch follows) */
+  rate: number;
+  /** Show the ms offset under every judgment, Marvelous included */
+  showHitMs: boolean;
+  /** No bloom, bursts, particles or glows: only notes and receptors */
+  focus: boolean;
 }
 
-/** Available CMod speeds */
-export const CMOD_OPTIONS = [0, 300, 400, 500, 600, 700, 800, 900, 1000] as const;
+export const RATE_OPTIONS = [0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1, 1.05, 1.1, 1.2, 1.3, 1.5] as const;
 
-/** Default settings */
+/** C-mod in steps of 25 between 300 and 1200 */
+export const CMOD_OPTIONS = Array.from({ length: 37 }, (_, i) => 300 + i * 25);
+
 export const DEFAULT_SETTINGS: Settings = {
-  audioOffset: -180,
-  visualOffset: 0,
-  scrollSpeed: 1,
-  cmod: 500, // Default to C500
-  backgroundDim: 0.8,
-  noteSkin: 'arrows',
+  offsetMs: 0,
+  cmod: 500,
+  perspective: 'flat',
+  assistTick: false,
+  musicVolume: 0.9,
+  sfxVolume: 0.8,
+  voiceVolume: 0.9,
+  rate: 1,
+  showHitMs: false,
+  focus: false,
 };

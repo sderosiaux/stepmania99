@@ -1,593 +1,344 @@
-import type { ResultsData, Direction } from '../types';
-import { THEME } from '../render';
-import { DIRECTIONS } from '../types';
+import type { ResultsData, JudgmentGrade, LetterGrade } from '../types';
+import { DIRECTIONS, TIMING_WINDOWS } from '../types';
+import { audio, type SfxId } from '../audio';
+import { JUDGMENT_LABEL, THEME } from '../render/theme';
+import { escapeHtml, fitCanvas } from './dom';
+import { breakdown, coach } from './precision';
+import { chartStats } from './chart-stats';
 
 // ============================================================================
-// Results Screen
+// Results: staged reveal (judgments → score → grade slam → badges), then the
+// timing breakdown that tells the player what to fix — including an offset
+// suggestion when their hits are consistently early or late.
 // ============================================================================
 
 export interface ResultsCallbacks {
   onContinue: () => void;
-  onRetry?: () => void;
+  onRetry: () => void;
+  onApplyOffset: (deltaMs: number) => void;
+}
+
+const GRADE_VO: Record<LetterGrade, SfxId | null> = {
+  AAAA: 'vo-grade-aaaa',
+  AAA: 'vo-grade-aaa',
+  AA: 'vo-grade-aa',
+  A: 'vo-grade-a',
+  B: 'vo-grade-b',
+  C: 'vo-grade-c',
+  D: 'vo-grade-d',
+  E: null,
+};
+
+/** Minimum hits before an offset suggestion is trustworthy */
+const MIN_SAMPLES_FOR_SUGGESTION = 40;
+const SUGGESTION_THRESHOLD_MS = 8;
+
+export function offsetStats(offsets: number[]): { mean: number; sd: number; median: number } {
+  if (offsets.length === 0) return { mean: 0, sd: 0, median: 0 };
+  const mean = offsets.reduce((a, b) => a + b, 0) / offsets.length;
+  const sd = Math.sqrt(offsets.reduce((a, b) => a + (b - mean) ** 2, 0) / offsets.length);
+  const sorted = [...offsets].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)]!;
+  return { mean, sd, median };
 }
 
 export class ResultsScreen {
-  private container: HTMLElement;
-  private callbacks: ResultsCallbacks;
-  private boundKeyHandler: (e: KeyboardEvent) => void;
+  private readonly root: HTMLElement;
+  private timers: number[] = [];
+  private visible = false;
+  private suggestion = 0;
 
-  constructor(container: HTMLElement, callbacks: ResultsCallbacks) {
-    this.container = container;
-    this.callbacks = callbacks;
-    this.boundKeyHandler = this.handleKey.bind(this);
+  constructor(
+    parent: HTMLElement,
+    private readonly cb: ResultsCallbacks
+  ) {
+    this.root = document.createElement('div');
+    this.root.className = 'results hidden';
+    parent.appendChild(this.root);
   }
 
-  /**
-   * Show the results screen
-   */
-  show(results: ResultsData): void {
-    this.render(results);
-    window.addEventListener('keydown', this.boundKeyHandler);
+  show(r: ResultsData, newRecord: boolean, multiplayer: boolean): void {
+    this.visible = true;
+    this.clearTimers();
+    const stats = offsetStats(r.offsets);
+    this.suggestion = !r.autoplay && r.offsets.length >= MIN_SAMPLES_FOR_SUGGESTION && Math.abs(stats.median) >= SUGGESTION_THRESHOLD_MS ? Math.round(stats.median) : 0;
+    const grades: JudgmentGrade[] = ['marvelous', 'perfect', 'great', 'good', 'boo', 'miss'];
+    const fcLabel = r.isFullCombo
+      ? r.judgmentCounts.great > 0
+        ? 'FULL COMBO'
+        : r.judgmentCounts.perfect > 0
+          ? 'PERFECT FULL COMBO'
+          : 'MARVELOUS FULL COMBO'
+      : '';
+
+    this.root.innerHTML = `
+      <div class="results-inner">
+        <header class="res-head">
+          <div class="res-song">
+            <div class="res-title">${escapeHtml(r.song.title)}</div>
+            <div class="res-artist">${escapeHtml(r.song.artist)}</div>
+          </div>
+          <div class="res-chart" data-diff="${r.chart.difficulty}">${r.chart.difficulty.toUpperCase()} <b>${r.chart.level}</b></div>
+          ${r.autoplay ? '<div class="res-auto">AUTOPLAY · not saved</div>' : r.rate !== 1 ? `<div class="res-auto">RATE ${r.rate}× · not saved</div>` : ''}
+        </header>
+        <section class="res-main">
+          <div class="res-grade-wrap">
+            <div class="res-grade" data-grade="${r.grade}" data-text="${r.grade}">${r.grade}</div>
+            <div class="res-fc">${fcLabel}</div>
+            <div class="res-record ${newRecord ? '' : 'hidden'}">NEW RECORD</div>
+          </div>
+          <div class="res-numbers">
+            <div class="res-score-label">SCORE</div>
+            <div class="res-score">0</div>
+            <div class="res-pct">${r.percentage.toFixed(2)}%</div>
+            <div class="res-sub"><span>EX <b>${r.exScore}</b> / ${r.maxExScore}</span><span>MAX COMBO <b>${r.maxCombo}</b></span></div>
+            <ul class="res-judgments">
+              ${grades
+                .map((g) => `<li style="--c: var(--judge-${g})"><span>${JUDGMENT_LABEL[g]}</span><b>${r.judgmentCounts[g]}</b></li>`)
+                .join('')}
+              <li style="--c: var(--accent-success)"><span>OK</span><b>${r.holdCounts.ok}</b></li>
+              <li style="--c: var(--accent-danger)"><span>N.G.</span><b>${r.holdCounts.ng}</b></li>
+              ${r.minesHit ? `<li style="--c: var(--accent-danger)"><span>MINES HIT</span><b>${r.minesHit}</b></li>` : ''}
+            </ul>
+          </div>
+        </section>
+        <section class="res-timing glass">
+          <div class="res-timing-head">
+            <h3>Timing</h3>
+            <span>mean <b>${stats.mean >= 0 ? '+' : ''}${stats.mean.toFixed(1)} ms</b></span>
+            <span>σ <b>${stats.sd.toFixed(1)} ms</b></span>
+            <span class="res-early-late">${stats.mean < -2 ? 'You tend to hit <b>early</b>' : stats.mean > 2 ? 'You tend to hit <b>late</b>' : 'Centered'}</span>
+          </div>
+          <div class="res-timing-body">
+          <div class="res-timing-left">
+          <canvas class="res-hist"></canvas>
+          <div class="res-dirs">${DIRECTIONS.map((d, i) => {
+            const s = r.directionStats[d];
+            const pos = Math.max(-1, Math.min(1, s.avgTiming / TIMING_WINDOWS.great));
+            return `<div class="res-dir"><span class="res-dir-arrow" style="color:${THEME.lane[i]}">${['←', '↓', '↑', '→'][i]}</span>
+              <div class="res-dir-bar"><i style="left:${50 + pos * 50}%"></i></div><b>${s.count ? `${s.avgTiming >= 0 ? '+' : ''}${s.avgTiming.toFixed(0)}` : '–'}</b></div>`;
+          }).join('')}</div>
+          </div>
+          <div class="res-precision">
+            <table>
+              <thead><tr><th></th><th>hits</th><th>mean</th><th>σ</th><th>marv</th></tr></thead>
+              <tbody>${breakdown(r.hits)
+                .map((g) => `<tr><th>${g.label}</th><td>${g.n}</td><td>${g.mean >= 0 ? '+' : ''}${g.mean.toFixed(0)}</td><td>${g.sd.toFixed(1)}</td><td>${Math.round(g.marvelous * 100)}%</td></tr>`)
+                .join('')}</tbody>
+            </table>
+            <ul class="res-coach">${coach(r.hits).map((l) => `<li>${escapeHtml(l)}</li>`).join('')}</ul>
+          </div>
+          </div>
+          ${this.suggestion
+            ? `<div class="res-suggest">Your hits sit <b>${Math.abs(this.suggestion)} ms ${this.suggestion > 0 ? 'late' : 'early'}</b> <button class="btn" data-act="offset"><kbd>O</kbd> Shift offset ${this.suggestion > 0 ? '+' : ''}${this.suggestion} ms</button></div>`
+            : ''}
+          <div class="res-map-head"><span>Run map</span><i style="--c:var(--judge-miss)">miss / N.G.</i><i style="--c:var(--judge-boo)">boo</i><i style="--c:var(--judge-good)">good</i><i style="--c:var(--accent-success)">life</i></div>
+          <canvas class="res-life"></canvas>
+        </section>
+        <footer class="res-actions">
+          ${multiplayer ? '' : '<button class="btn" data-act="retry"><kbd>R</kbd> Retry</button>'}
+          <button class="btn btn-primary" data-act="continue"><kbd>Enter</kbd> Continue</button>
+        </footer>
+      </div>`;
+    this.root.classList.remove('hidden');
+    this.root.classList.toggle('failed', r.failed);
+
+    this.root.querySelector('[data-act="continue"]')!.addEventListener('click', () => this.leave('continue'));
+    this.root.querySelector('[data-act="retry"]')?.addEventListener('click', () => this.leave('retry'));
+    this.root.querySelector('[data-act="offset"]')?.addEventListener('click', () => this.applyOffset());
+    window.addEventListener('keydown', this.onKey);
+
+    this.drawHistogram(r.offsets);
+    this.drawLife(r);
+    this.stage(r, newRecord);
   }
 
-  /**
-   * Hide the screen
-   */
   hide(): void {
-    window.removeEventListener('keydown', this.boundKeyHandler);
-    this.container.innerHTML = '';
+    this.visible = false;
+    this.clearTimers();
+    window.removeEventListener('keydown', this.onKey);
+    this.root.classList.add('hidden');
   }
 
-  /**
-   * Handle keyboard input
-   */
-  private handleKey(e: KeyboardEvent): void {
-    switch (e.code) {
-      case 'Enter':
-        e.preventDefault();
-        this.callbacks.onContinue();
-        break;
+  private onKey = (e: KeyboardEvent) => {
+    if (!this.visible || e.repeat) return;
+    if (e.code === 'Enter' || e.code === 'Escape') this.leave('continue');
+    else if (e.code === 'KeyR' && this.root.querySelector('[data-act="retry"]')) this.leave('retry');
+    else if (e.code === 'KeyO') this.applyOffset();
+    else return;
+    e.preventDefault();
+  };
 
-      case 'KeyR':
-        e.preventDefault();
-        this.callbacks.onRetry?.();
-        break;
+  private applyOffset(): void {
+    if (!this.suggestion) return;
+    this.cb.onApplyOffset(this.suggestion);
+    const s = this.root.querySelector('.res-suggest');
+    if (s) s.innerHTML = `Offset shifted by <b>${this.suggestion > 0 ? '+' : ''}${this.suggestion} ms</b>. Retry to feel the difference.`;
+    audio.play1('ui-select');
+    this.suggestion = 0;
+  }
 
-      case 'Escape':
-        e.preventDefault();
-        this.callbacks.onContinue();
-        break;
+  private leave(to: 'continue' | 'retry'): void {
+    audio.play1(to === 'retry' ? 'ui-start' : 'ui-back');
+    this.hide();
+    if (to === 'retry') this.cb.onRetry();
+    else this.cb.onContinue();
+  }
+
+  private clearTimers(): void {
+    this.timers.forEach(clearTimeout);
+    this.timers = [];
+  }
+
+  private at(ms: number, fn: () => void): void {
+    this.timers.push(window.setTimeout(() => this.visible && fn(), ms));
+  }
+
+  /** Staged reveal, mirrored by sound */
+  private stage(r: ResultsData, newRecord: boolean): void {
+    const q = (s: string) => this.root.querySelector(s) as HTMLElement;
+    audio.play1('whoosh');
+    this.root.querySelectorAll<HTMLElement>('.res-judgments li').forEach((li, i) => {
+      li.style.opacity = '0';
+      this.at(250 + i * 90, () => {
+        li.animate([{ transform: 'translateX(40px)', opacity: 0 }, { transform: 'none', opacity: 1 }], { duration: 260, easing: 'cubic-bezier(.2,.9,.2,1)', fill: 'forwards' });
+        audio.play1('score-tick', { gain: 0.5, rate: 1 + i * 0.06 });
+      });
+    });
+
+    const scoreEl = q('.res-score');
+    const countStart = 700;
+    const countMs = 900;
+    this.at(countStart, () => {
+      const t0 = performance.now();
+      let lastTick = 0;
+      const step = () => {
+        if (!this.visible) return;
+        const k = Math.min(1, (performance.now() - t0) / countMs);
+        const eased = 1 - Math.pow(1 - k, 3);
+        scoreEl.textContent = Math.round(r.score * eased).toLocaleString('en-US');
+        if (performance.now() - lastTick > 55 && k < 1) {
+          lastTick = performance.now();
+          audio.play1('score-tick', { gain: 0.35, rate: 0.9 + eased * 0.8 });
+        }
+        if (k < 1) requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    });
+
+    const grade = q('.res-grade');
+    grade.style.opacity = '0';
+    this.at(countStart + countMs + 150, () => {
+      grade.animate(
+        [
+          { transform: 'scale(3.2) rotate(-8deg)', opacity: 0, filter: 'blur(12px) brightness(3)' },
+          { transform: 'scale(0.92) rotate(0deg)', opacity: 1, filter: 'blur(0) brightness(1.6)', offset: 0.55 },
+          { transform: 'scale(1)', opacity: 1, filter: 'blur(0) brightness(1)' },
+        ],
+        { duration: 520, easing: 'cubic-bezier(.3,1.4,.4,1)', fill: 'forwards' }
+      );
+      audio.play1('grade-slam');
+      this.root.animate([{ transform: 'translate(6px,-4px)' }, { transform: 'translate(-5px,3px)' }, { transform: 'none' }], { duration: 220, delay: 280 });
+      const vo = r.failed ? 'vo-failed' : GRADE_VO[r.grade];
+      if (vo) this.at(450, () => audio.play1(vo));
+    });
+
+    const fc = q('.res-fc');
+    fc.style.opacity = '0';
+    if (r.isFullCombo) {
+      this.at(countStart + countMs + 1000, () => {
+        fc.animate([{ transform: 'scaleX(0)', opacity: 0 }, { transform: 'scaleX(1)', opacity: 1 }], { duration: 380, easing: 'cubic-bezier(.2,.9,.2,1)', fill: 'forwards' });
+        audio.play1('milestone');
+      });
+    }
+    if (newRecord) {
+      const rec = q('.res-record');
+      rec.style.opacity = '0';
+      this.at(countStart + countMs + (r.isFullCombo ? 2400 : 1500), () => {
+        rec.animate([{ transform: 'translateY(16px)', opacity: 0 }, { transform: 'none', opacity: 1 }], { duration: 300, fill: 'forwards' });
+        audio.play1('vo-new-record');
+      });
     }
   }
 
-  /**
-   * Get gradient colors for grade-based animated background (intense)
-   */
-  private getGradeGradientColors(grade: string, failed: boolean): string[] {
-    if (failed) {
-      return ['#2a0808', '#450e0e', '#2a0808'];
+  private drawHistogram(offsets: number[]): void {
+    const { ctx, w, h } = fitCanvas(this.root.querySelector('.res-hist') as HTMLCanvasElement);
+    const range = TIMING_WINDOWS.good;
+    const binMs = 3;
+    const bins = new Array<number>(Math.ceil((range * 2) / binMs)).fill(0);
+    for (const o of offsets) {
+      const i = Math.floor((Math.max(-range, Math.min(range - 0.001, o)) + range) / binMs);
+      bins[i]!++;
     }
-    switch (grade) {
-      case 'AAAA':
-        return ['#0a2828', '#124040', '#0a2828', '#0e3535']; // Intense cyan/teal
-      case 'AAA':
-        return ['#0a2525', '#103838', '#0a2525']; // Cyan tones
-      case 'AA':
-        return ['#282808', '#404010', '#282808']; // Yellow tones
-      case 'A':
-        return ['#0a280a', '#104010', '#0a280a']; // Green tones
-      case 'B':
-        return ['#0a0a28', '#101040', '#0a0a28']; // Blue tones
-      case 'C':
-        return ['#28200a', '#403510', '#28200a']; // Orange tones
-      case 'D':
-        return ['#280a0a', '#401010', '#280a0a']; // Red tones
-      default:
-        return ['#0d0d0d', '#1a1a1a', '#0d0d0d'];
+    const max = Math.max(1, ...bins);
+    const x = (ms: number) => ((ms + range) / (range * 2)) * w;
+    const bands: [number, string][] = [
+      [TIMING_WINDOWS.good, THEME.judgment.good],
+      [TIMING_WINDOWS.great, THEME.judgment.great],
+      [TIMING_WINDOWS.perfect, THEME.judgment.perfect],
+      [TIMING_WINDOWS.marvelous, THEME.judgment.marvelous],
+    ];
+    for (const [win, color] of bands) {
+      ctx.fillStyle = color;
+      ctx.globalAlpha = 0.07;
+      ctx.fillRect(x(-win), 0, x(win) - x(-win), h);
     }
+    ctx.globalAlpha = 1;
+    bins.forEach((c, i) => {
+      const ms = i * binMs - range + binMs / 2;
+      const abs = Math.abs(ms);
+      const color = abs <= TIMING_WINDOWS.marvelous ? THEME.judgment.marvelous : abs <= TIMING_WINDOWS.perfect ? THEME.judgment.perfect : abs <= TIMING_WINDOWS.great ? THEME.judgment.great : THEME.judgment.good;
+      const bh = (c / max) * (h - 18);
+      ctx.fillStyle = color;
+      ctx.fillRect(x(i * binMs - range) + 1, h - 14 - bh, (w / bins.length) - 2, bh);
+    });
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.fillRect(x(0) - 0.5, 0, 1, h - 14);
+    ctx.font = '600 11px "Chakra Petch", system-ui, sans-serif';
+    ctx.fillStyle = THEME.text.muted;
+    ctx.textAlign = 'center';
+    for (const ms of [-135, -90, -45, 0, 45, 90, 135]) ctx.fillText(`${ms > 0 ? '+' : ''}${ms}`, Math.min(w - 14, Math.max(14, x(ms))), h - 2);
+    ctx.textAlign = 'left';
+    ctx.fillText('EARLY', 6, 12);
+    ctx.textAlign = 'right';
+    ctx.fillText('LATE', w - 6, 12);
   }
 
-  /**
-   * Render the results
-   */
-  private render(results: ResultsData): void {
-    const gradeColor = results.failed ? '#ff2222' : this.getGradeColor(results.grade);
-    const gradeText = results.failed ? 'FAILED' : results.grade;
-    const gradientColors = this.getGradeGradientColors(results.grade, results.failed ?? false);
-    const gradientCSS = gradientColors.join(', ');
+  /** Run map: chart density, where each error happened, and the life line on the same time axis */
+  private drawLife(r: ResultsData): void {
+    const { ctx, w, h } = fitCanvas(this.root.querySelector('.res-life') as HTMLCanvasElement);
+    const st = chartStats(r.chart);
+    const span = Math.max(1, st.endMs - st.startMs);
+    const x = (t: number) => Math.max(0, Math.min(w, ((t - st.startMs) / span) * w));
 
-    this.container.innerHTML = `
-      <div class="results-screen ${results.failed ? 'failed' : ''}" data-grade="${results.grade}">
-        <div class="results-bg"></div>
-        <div class="results-content">
-          <div class="song-info">
-            <h2>${escapeHtml(results.song.title)}</h2>
-            <p class="artist">${escapeHtml(results.song.artist)}</p>
-            <p class="chart-info">${results.chart.difficulty} (Lv. ${results.chart.level})</p>
-          </div>
+    const max = Math.max(8, ...st.density);
+    ctx.beginPath();
+    ctx.moveTo(0, h);
+    st.density.forEach((d, i) => ctx.lineTo((i / Math.max(1, st.density.length - 1)) * w, h - (d / max) * (h - 4)));
+    ctx.lineTo(w, h);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(160, 140, 255, 0.16)';
+    ctx.fill();
 
-          <div class="grade-display" style="color: ${gradeColor}">
-            ${gradeText}
-          </div>
-
-          <div class="score-display">
-            <div class="score-value">${results.score.toString().padStart(7, '0')}</div>
-            <div class="percentage">${results.percentage.toFixed(2)}%</div>
-          </div>
-
-          <div class="stats-grid">
-            <div class="stat-row">
-              <span class="stat-label" style="color: ${THEME.judgment.marvelous}">MARVELOUS</span>
-              <span class="stat-value">${results.judgmentCounts.marvelous}</span>
-            </div>
-            <div class="stat-row">
-              <span class="stat-label" style="color: ${THEME.judgment.perfect}">PERFECT</span>
-              <span class="stat-value">${results.judgmentCounts.perfect}</span>
-            </div>
-            <div class="stat-row">
-              <span class="stat-label" style="color: ${THEME.judgment.great}">GREAT</span>
-              <span class="stat-value">${results.judgmentCounts.great}</span>
-            </div>
-            <div class="stat-row">
-              <span class="stat-label" style="color: ${THEME.judgment.good}">GOOD</span>
-              <span class="stat-value">${results.judgmentCounts.good}</span>
-            </div>
-            <div class="stat-row">
-              <span class="stat-label" style="color: ${THEME.judgment.boo}">BOO</span>
-              <span class="stat-value">${results.judgmentCounts.boo}</span>
-            </div>
-            <div class="stat-row">
-              <span class="stat-label" style="color: ${THEME.judgment.miss}">MISS</span>
-              <span class="stat-value">${results.judgmentCounts.miss}</span>
-            </div>
-          </div>
-
-          ${this.renderDirectionStats(results)}
-
-          <div class="combo-display">
-            ${results.isFullCombo ? '<div class="full-combo">★ FULL COMBO ★</div>' : ''}
-            MAX COMBO: <span class="combo-value">${results.maxCombo}</span>
-          </div>
-
-          <div class="controls-hint">
-            <span><kbd>ENTER</kbd> Continue</span>
-            <span><kbd>R</kbd> Retry</span>
-          </div>
-        </div>
-      </div>
-      <style>
-        .results-screen {
-          position: fixed;
-          inset: 0;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          background: ${THEME.bg.primary};
-          color: ${THEME.text.primary};
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-          animation: fadeIn 0.3s ease;
-          overflow: hidden;
-        }
-
-        .results-bg {
-          position: absolute;
-          inset: -50%;
-          width: 200%;
-          height: 200%;
-          background: radial-gradient(ellipse at center, ${gradientCSS});
-          animation: bgRotate 12s linear infinite, bgPulse 3s ease-in-out infinite;
-          opacity: 1;
-          z-index: 0;
-        }
-
-        .results-screen[data-grade="AAAA"] .results-bg {
-          background:
-            radial-gradient(ellipse at 30% 30%, rgba(0, 255, 255, 0.35) 0%, transparent 40%),
-            radial-gradient(ellipse at 70% 70%, rgba(0, 200, 200, 0.25) 0%, transparent 40%),
-            radial-gradient(ellipse at 50% 50%, rgba(0, 180, 180, 0.2) 0%, transparent 60%),
-            radial-gradient(ellipse at center, #0a2828, #124040, #0a2828);
-          animation: bgRotate 8s linear infinite, bgPulse 2s ease-in-out infinite, shimmer 1.5s ease-in-out infinite;
-        }
-
-        .results-screen[data-grade="AAA"] .results-bg {
-          background:
-            radial-gradient(ellipse at 40% 40%, rgba(0, 220, 220, 0.25) 0%, transparent 45%),
-            radial-gradient(ellipse at 60% 60%, rgba(0, 180, 180, 0.15) 0%, transparent 50%),
-            radial-gradient(ellipse at center, #0a2525, #103838, #0a2525);
-        }
-
-        .results-screen[data-grade="AA"] .results-bg {
-          background:
-            radial-gradient(ellipse at 40% 40%, rgba(255, 255, 0, 0.2) 0%, transparent 45%),
-            radial-gradient(ellipse at 60% 60%, rgba(200, 200, 0, 0.12) 0%, transparent 50%),
-            radial-gradient(ellipse at center, #282808, #404010, #282808);
-        }
-
-        .results-screen[data-grade="A"] .results-bg {
-          background:
-            radial-gradient(ellipse at 45% 45%, rgba(0, 255, 100, 0.18) 0%, transparent 45%),
-            radial-gradient(ellipse at center, #0a280a, #104010, #0a280a);
-        }
-
-        .results-screen[data-grade="B"] .results-bg {
-          background:
-            radial-gradient(ellipse at 45% 45%, rgba(0, 150, 255, 0.18) 0%, transparent 45%),
-            radial-gradient(ellipse at center, #0a0a28, #101040, #0a0a28);
-        }
-
-        .results-screen[data-grade="C"] .results-bg {
-          background:
-            radial-gradient(ellipse at 45% 45%, rgba(255, 150, 0, 0.18) 0%, transparent 45%),
-            radial-gradient(ellipse at center, #28200a, #403510, #28200a);
-        }
-
-        .results-screen[data-grade="D"] .results-bg {
-          background:
-            radial-gradient(ellipse at 45% 45%, rgba(255, 50, 50, 0.15) 0%, transparent 45%),
-            radial-gradient(ellipse at center, #280a0a, #401010, #280a0a);
-        }
-
-        .results-screen.failed .results-bg {
-          background:
-            radial-gradient(ellipse at 50% 50%, rgba(255, 0, 0, 0.25) 0%, transparent 50%),
-            radial-gradient(ellipse at center, #2a0808, #450e0e, #2a0808);
-          animation: bgRotate 12s linear infinite, failPulse 0.8s ease-in-out infinite;
-        }
-
-        @keyframes bgRotate {
-          from { transform: rotate(0deg); }
-          to { transform: rotate(360deg); }
-        }
-
-        @keyframes bgPulse {
-          0%, 100% { transform: rotate(0deg) scale(1); opacity: 0.7; }
-          50% { transform: rotate(180deg) scale(1.1); opacity: 0.9; }
-        }
-
-        @keyframes shimmer {
-          0%, 100% { filter: brightness(1); }
-          50% { filter: brightness(1.2); }
-        }
-
-        @keyframes failPulse {
-          0%, 100% { opacity: 0.6; }
-          50% { opacity: 0.8; }
-        }
-
-        @keyframes fadeIn {
-          from { opacity: 0; }
-          to { opacity: 1; }
-        }
-
-        .results-content {
-          position: relative;
-          z-index: 1;
-          text-align: center;
-          max-width: 500px;
-          padding: 2rem;
-        }
-
-        .song-info {
-          margin-bottom: 2rem;
-        }
-
-        .song-info h2 {
-          font-size: 1.5rem;
-          margin-bottom: 0.5rem;
-        }
-
-        .song-info .artist {
-          color: ${THEME.text.secondary};
-          margin-bottom: 0.25rem;
-        }
-
-        .song-info .chart-info {
-          color: ${THEME.accent.primary};
-          font-size: 0.9rem;
-        }
-
-        .grade-display {
-          font-size: 8rem;
-          font-weight: 900;
-          line-height: 1;
-          margin-bottom: 1rem;
-          text-shadow: 0 0 30px currentColor;
-          animation: gradeIn 0.5s ease-out;
-        }
-
-        @keyframes gradeIn {
-          from {
-            transform: scale(1.5);
-            opacity: 0;
-          }
-          to {
-            transform: scale(1);
-            opacity: 1;
-          }
-        }
-
-        .score-display {
-          margin-bottom: 2rem;
-        }
-
-        .score-value {
-          font-size: 3rem;
-          font-weight: 700;
-          font-family: 'SF Mono', Monaco, monospace;
-          letter-spacing: 0.1em;
-        }
-
-        .percentage {
-          font-size: 1.25rem;
-          color: ${THEME.text.secondary};
-        }
-
-        .stats-grid {
-          display: grid;
-          gap: 0.5rem;
-          margin-bottom: 1.5rem;
-          background: ${THEME.bg.secondary};
-          padding: 1rem 1.5rem;
-          border-radius: 12px;
-        }
-
-        .stat-row {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          font-size: 1rem;
-        }
-
-        .stat-label {
-          font-weight: 600;
-        }
-
-        .stat-value {
-          font-family: 'SF Mono', Monaco, monospace;
-          font-size: 1.1rem;
-        }
-
-        .combo-display {
-          font-size: 1.1rem;
-          color: ${THEME.text.secondary};
-          margin-bottom: 2rem;
-        }
-
-        .combo-value {
-          color: ${THEME.accent.primary};
-          font-weight: 700;
-          font-size: 1.3rem;
-        }
-
-        .full-combo {
-          font-size: 1.8rem;
-          font-weight: 900;
-          color: #ffdd00;
-          text-shadow: 0 0 20px #ffdd00, 0 0 40px #ff8800;
-          margin-bottom: 0.5rem;
-          animation: fcPulse 1s ease-in-out infinite, fcIn 0.5s ease-out;
-        }
-
-        @keyframes fcPulse {
-          0%, 100% {
-            text-shadow: 0 0 20px #ffdd00, 0 0 40px #ff8800;
-            transform: scale(1);
-          }
-          50% {
-            text-shadow: 0 0 30px #ffdd00, 0 0 60px #ff8800, 0 0 80px #ffaa00;
-            transform: scale(1.05);
-          }
-        }
-
-        @keyframes fcIn {
-          from {
-            transform: scale(1.5);
-            opacity: 0;
-          }
-          to {
-            transform: scale(1);
-            opacity: 1;
-          }
-        }
-
-        .controls-hint {
-          display: flex;
-          gap: 2rem;
-          justify-content: center;
-          color: ${THEME.text.secondary};
-          font-size: 0.85rem;
-        }
-
-        .controls-hint kbd {
-          display: inline-block;
-          padding: 0.2rem 0.5rem;
-          background: ${THEME.bg.tertiary};
-          border-radius: 4px;
-          margin-right: 0.25rem;
-          font-family: inherit;
-        }
-
-        .results-screen.failed .grade-display {
-          font-size: 5rem;
-          animation: failShake 0.5s ease-out;
-        }
-
-        @keyframes failShake {
-          0%, 100% { transform: translateX(0); }
-          10%, 30%, 50%, 70%, 90% { transform: translateX(-5px); }
-          20%, 40%, 60%, 80% { transform: translateX(5px); }
-        }
-
-        .direction-stats {
-          background: ${THEME.bg.secondary};
-          padding: 1rem;
-          border-radius: 12px;
-          margin-bottom: 1rem;
-        }
-
-        .direction-stats-title {
-          font-size: 0.75rem;
-          color: ${THEME.text.muted};
-          margin-bottom: 0.75rem;
-          text-transform: uppercase;
-          letter-spacing: 0.05em;
-        }
-
-        .direction-row {
-          display: flex;
-          align-items: center;
-          gap: 0.75rem;
-          margin-bottom: 0.5rem;
-        }
-
-        .direction-row:last-child {
-          margin-bottom: 0;
-        }
-
-        .direction-arrow {
-          font-size: 1.2rem;
-          width: 24px;
-          text-align: center;
-        }
-
-        .direction-count {
-          font-size: 0.85rem;
-          color: ${THEME.text.secondary};
-          width: 35px;
-          text-align: right;
-          font-family: 'SF Mono', Monaco, monospace;
-        }
-
-        .timing-bar-container {
-          flex: 1;
-          height: 8px;
-          background: ${THEME.bg.tertiary};
-          border-radius: 4px;
-          position: relative;
-          overflow: hidden;
-        }
-
-        .timing-bar-center {
-          position: absolute;
-          left: 50%;
-          top: 0;
-          bottom: 0;
-          width: 2px;
-          background: rgba(255, 255, 255, 0.3);
-          transform: translateX(-50%);
-        }
-
-        .timing-bar-indicator {
-          position: absolute;
-          top: 50%;
-          width: 10px;
-          height: 10px;
-          border-radius: 50%;
-          transform: translate(-50%, -50%);
-          border: 2px solid white;
-        }
-
-        .timing-value {
-          font-size: 0.75rem;
-          width: 45px;
-          text-align: right;
-          font-family: 'SF Mono', Monaco, monospace;
-        }
-      </style>
-    `;
-  }
-
-  /**
-   * Render direction timing stats
-   */
-  private renderDirectionStats(results: ResultsData): string {
-    if (!results.directionStats) return '';
-
-    const arrowColors: Record<Direction, string> = {
-      left: THEME.arrows.left,
-      down: THEME.arrows.down,
-      up: THEME.arrows.up,
-      right: THEME.arrows.right,
-    };
-
-    const arrowSymbols: Record<Direction, string> = {
-      left: '←',
-      down: '↓',
-      up: '↑',
-      right: '→',
-    };
-
-    let html = '<div class="direction-stats"><div class="direction-stats-title">Timing by Direction</div>';
-
-    for (const dir of DIRECTIONS) {
-      const stats = results.directionStats[dir];
-      const color = arrowColors[dir];
-      const arrow = arrowSymbols[dir];
-
-      // Calculate position on bar (-100ms to +100ms range, centered at 50%)
-      const maxOffset = 100;
-      const clampedAvg = Math.max(-maxOffset, Math.min(maxOffset, stats.avgTiming));
-      const position = 50 + (clampedAvg / maxOffset) * 50; // 0% to 100%
-
-      // Color based on timing
-      let indicatorColor = '#66bb6a'; // Good - green
-      if (stats.avgTiming < -15) {
-        indicatorColor = '#4fc3f7'; // Early - blue
-      } else if (stats.avgTiming > 15) {
-        indicatorColor = '#ff7043'; // Late - orange
-      }
-
-      const avgMs = Math.round(stats.avgTiming);
-      const sign = avgMs >= 0 ? '+' : '';
-      const timingText = stats.count > 0 ? `${sign}${avgMs}ms` : '--';
-
-      html += `
-        <div class="direction-row">
-          <span class="direction-arrow" style="color: ${color}">${arrow}</span>
-          <span class="direction-count">${stats.count}</span>
-          <div class="timing-bar-container">
-            <div class="timing-bar-center"></div>
-            ${stats.count > 0 ? `<div class="timing-bar-indicator" style="left: ${position}%; background: ${indicatorColor};"></div>` : ''}
-          </div>
-          <span class="timing-value" style="color: ${indicatorColor}">${timingText}</span>
-        </div>
-      `;
+    const COLORS: Record<string, string> = { miss: THEME.judgment.miss, ng: THEME.judgment.miss, mine: THEME.mine, boo: THEME.judgment.boo, good: THEME.judgment.good };
+    for (const e of r.errors) {
+      const tall = e.kind === 'miss' || e.kind === 'ng' || e.kind === 'mine';
+      ctx.fillStyle = COLORS[e.kind]!;
+      ctx.globalAlpha = tall ? 0.95 : 0.6;
+      ctx.fillRect(Math.round(x(e.time)) - 1, tall ? 0 : h * 0.4, 2, tall ? h : h * 0.6);
     }
+    ctx.globalAlpha = 1;
 
-    html += '</div>';
-    return html;
+    const pts = r.lifeHistory;
+    if (pts.length < 2) return;
+    ctx.beginPath();
+    pts.forEach((p, i) => {
+      const y = h - (p.life / 100) * (h - 4) - 2;
+      if (i) ctx.lineTo(x(p.time), y);
+      else ctx.moveTo(x(p.time), y);
+    });
+    ctx.strokeStyle = THEME.accent.success;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
   }
-
-  /**
-   * Get color for grade
-   */
-  private getGradeColor(grade: string): string {
-    switch (grade) {
-      case 'AAAA':
-        return '#00ffff'; // Bright cyan with glow
-      case 'AAA':
-        return '#00dddd'; // Cyan
-      case 'AA':
-        return '#ffff00'; // Yellow
-      case 'A':
-        return '#00ff00'; // Green
-      case 'B':
-        return '#0088ff'; // Blue
-      case 'C':
-        return '#ff8800'; // Orange
-      case 'D':
-        return '#ff0000'; // Red
-      default:
-        return THEME.text.primary;
-    }
-  }
-}
-
-/**
- * Escape HTML to prevent XSS
- */
-function escapeHtml(text: string): string {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
 }

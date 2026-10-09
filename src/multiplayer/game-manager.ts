@@ -8,7 +8,9 @@
  */
 
 import type { Direction, Note } from '../types';
+import { DIRECTIONS } from '../types';
 import type { AttackArrow } from '../types/multiplayer';
+import { ATTACK_CONFIG } from '../types/multiplayer';
 import { multiplayerClient, type MultiplayerEvent } from './client';
 
 // ============================================================================
@@ -25,27 +27,11 @@ export interface OpponentState {
   placement?: number;
 }
 
-export interface AttackNote extends Note {
-  isAttack: true;
+export interface AttackNote {
+  note: Note;
   fromPlayerName: string;
 }
 
-// ============================================================================
-// Attack Configuration
-// ============================================================================
-
-const ATTACK_CONFIG = {
-  /** Combo threshold to trigger attack */
-  comboThreshold: 10,
-  /** Number of arrows sent per attack */
-  arrowsPerAttack: 2,
-  /** Min time before attack arrow appears (ms) */
-  minTimeOffset: 800,
-  /** Max time before attack arrow appears (ms) */
-  maxTimeOffset: 2500,
-  /** Damage when attack arrow is missed */
-  missedAttackDamage: 5,
-} as const;
 
 // ============================================================================
 // Multiplayer Game Manager Class
@@ -58,8 +44,8 @@ export class MultiplayerGameManager {
   /** Pending attack arrows to be injected */
   private pendingAttacks: AttackArrow[] = [];
 
-  /** Active attack notes in the game */
-  private activeAttackNotes: AttackNote[] = [];
+  /** Attack note ids are negative so they never collide with chart notes */
+  private nextAttackId = -1;
 
   /** Last combo value (to detect combo milestones) */
   private lastCombo = 0;
@@ -93,7 +79,7 @@ export class MultiplayerGameManager {
   init(): void {
     this.opponents.clear();
     this.pendingAttacks = [];
-    this.activeAttackNotes = [];
+    this.nextAttackId = -1;
     this.lastCombo = 0;
     this.attacksSent = 0;
     this.attacksReceived = 0;
@@ -125,7 +111,6 @@ export class MultiplayerGameManager {
   destroy(): void {
     this.opponents.clear();
     this.pendingAttacks = [];
-    this.activeAttackNotes = [];
   }
 
   // ============================================================================
@@ -199,46 +184,41 @@ export class MultiplayerGameManager {
     const comboMilestone = Math.floor(combo / ATTACK_CONFIG.comboThreshold);
     const lastMilestone = Math.floor(this.lastCombo / ATTACK_CONFIG.comboThreshold);
 
-    if (comboMilestone > lastMilestone && combo >= ATTACK_CONFIG.comboThreshold) {
-      this.triggerAttack();
-    }
-
+    const attack = comboMilestone > lastMilestone && combo >= ATTACK_CONFIG.comboThreshold;
     this.lastCombo = combo;
 
-    // Throttle updates to server
+    // Throttled, except right before an attack: the server checks the combo it last saw
     const now = performance.now();
-    if (now - this.lastUpdateTime >= this.UPDATE_INTERVAL) {
+    if (attack || now - this.lastUpdateTime >= this.UPDATE_INTERVAL) {
       multiplayerClient.updateState(health, combo, score);
       this.lastUpdateTime = now;
     }
+    if (attack) this.triggerAttack();
 
     // Process pending attacks
     this.processPendingAttacks(currentTime);
   }
 
   /**
-   * Process pending attacks and create attack notes
+   * Turn received attacks into real notes, `timeOffset` ms ahead of the current song time
    */
   private processPendingAttacks(currentTime: number): void {
-    for (let i = this.pendingAttacks.length - 1; i >= 0; i--) {
-      const attack = this.pendingAttacks[i]!;
-      const targetTime = currentTime + attack.timeOffset;
-
-      // Create attack note
-      const attackNote: AttackNote = {
-        id: Date.now() * 1000 + Math.random() * 1000, // Unique ID
-        time: targetTime,
+    for (const attack of this.pendingAttacks) {
+      const lane = DIRECTIONS.indexOf(attack.direction);
+      if (lane < 0) continue;
+      const note: Note = {
+        id: this.nextAttackId--,
+        time: currentTime + attack.timeOffset,
+        beat: Number.NaN,
         direction: attack.direction,
+        lane,
         type: 'tap',
-        judged: false,
-        isAttack: true,
-        fromPlayerName: attack.fromPlayerName,
+        quant: 192,
+        attackFrom: attack.fromPlayerName,
       };
-
-      this.activeAttackNotes.push(attackNote);
-      this.onAttackReceived?.(attackNote);
-      this.pendingAttacks.splice(i, 1);
+      this.onAttackReceived?.({ note, fromPlayerName: attack.fromPlayerName });
     }
+    this.pendingAttacks = [];
   }
 
   /**
@@ -247,14 +227,10 @@ export class MultiplayerGameManager {
   private triggerAttack(): void {
     const directions: Direction[] = ['left', 'down', 'up', 'right'];
 
-    for (let i = 0; i < ATTACK_CONFIG.arrowsPerAttack; i++) {
-      const direction = directions[Math.floor(Math.random() * directions.length)]!;
-      const timeOffset = ATTACK_CONFIG.minTimeOffset +
-        Math.random() * (ATTACK_CONFIG.maxTimeOffset - ATTACK_CONFIG.minTimeOffset);
-
-      multiplayerClient.sendAttack(direction, timeOffset);
-      this.attacksSent++;
-    }
+    const direction = directions[Math.floor(Math.random() * directions.length)]!;
+    const timeOffset = ATTACK_CONFIG.minTimeOffset + Math.random() * (ATTACK_CONFIG.maxTimeOffset - ATTACK_CONFIG.minTimeOffset);
+    multiplayerClient.sendAttack(direction, timeOffset);
+    this.attacksSent++;
   }
 
   /**
@@ -267,36 +243,8 @@ export class MultiplayerGameManager {
   /**
    * Notify game finished
    */
-  notifyGameFinished(score: number, placement: number): void {
-    multiplayerClient.notifyGameFinished(score, placement);
-  }
-
-  // ============================================================================
-  // Attack Notes Management
-  // ============================================================================
-
-  /**
-   * Get active attack notes
-   */
-  getActiveAttackNotes(): AttackNote[] {
-    return this.activeAttackNotes;
-  }
-
-  /**
-   * Remove judged attack notes
-   */
-  cleanupAttackNotes(): void {
-    this.activeAttackNotes = this.activeAttackNotes.filter(n => !n.judged);
-  }
-
-  /**
-   * Mark attack note as judged
-   */
-  judgeAttackNote(noteId: number): void {
-    const note = this.activeAttackNotes.find(n => n.id === noteId);
-    if (note) {
-      note.judged = true;
-    }
+  notifyGameFinished(score: number): void {
+    multiplayerClient.notifyGameFinished(score);
   }
 
   // ============================================================================

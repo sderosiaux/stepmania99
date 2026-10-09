@@ -1,2469 +1,739 @@
-import type { Song, Chart, Settings, SongPack, NoteSkin } from '../types';
-import type { HostNavigationState, Room } from '../types/multiplayer';
-import { THEME } from '../render';
-import { DEFAULT_SETTINGS, NOTE_SKINS } from '../types';
-import { audioManager } from '../audio';
-import { multiplayerClient } from '../multiplayer';
-import type { MultiplayerEvent } from '../multiplayer';
-
-// Import helpers from extracted modules
-import {
-  formatBpm,
-  calculateChartStats,
-  calculateGrooveRadar,
-  getScore,
-  escapeHtml,
-  type GrooveRadar,
-} from './song-select/helpers';
-
-// Re-export saveScore for use by main.ts
-export { saveScore } from './song-select/helpers';
+import type { Song, Chart, Settings, Difficulty } from '../types';
+import { CMOD_OPTIONS, RATE_OPTIONS } from '../types';
+import type { HostNavigationState } from '../types/multiplayer';
+import type { SongEntry, ChartMeta } from '../core/manifest';
+import { loadSong, songDir } from '../core/loader';
+import { audio } from '../audio';
+import { multiplayerClient, type MultiplayerEvent } from '../multiplayer';
+import { chartStats, type ChartStats } from './chart-stats';
+import { getBest, getLastRunErrors } from './storage';
+import { escapeHtml, assetUrl, fitCanvas } from './dom';
+import { THEME } from '../render/theme';
+import { openMultiplayerModal, roomBarHtml, bindRoomBar } from './multiplayer-ui';
 
 // ============================================================================
-// Song Select Screen - 3 Column Layout
+// Song select: music wheel (left), song + chart detail (right), options bar.
+// Works from manifest entries; the simfile is loaded when a song is focused.
+// Keyboard-first; every action is also clickable.
 // ============================================================================
 
-export interface SongSelectCallbacks {
-  onSongSelect: (song: Song, chart: Chart, settings: Partial<Settings>) => void;
-  onDemo?: (song: Song, chart: Chart, settings: Partial<Settings>) => void;
-  onBack?: () => void;
-  onMultiplayer?: () => void;
+export interface PracticeRange {
+  from: number;
+  to: number;
 }
 
-const DIFFICULTY_FILTERS = ['All', 'Easy+', 'Medium+', 'Hard+', 'Challenge'] as const;
-type DifficultyFilter = typeof DIFFICULTY_FILTERS[number];
-const DIFFICULTY_ORDER = ['Beginner', 'Easy', 'Medium', 'Hard', 'Challenge'] as const;
+export interface SongSelectCallbacks {
+  onPlay: (entry: SongEntry, difficulty: Difficulty, autoplay: boolean, practice?: PracticeRange) => void;
+  onCalibrate: () => void;
+  onSettings: (s: Settings) => void;
+}
+
+const DIFFS: Difficulty[] = ['Beginner', 'Easy', 'Medium', 'Hard', 'Challenge'];
+const WHEEL_SPAN = 6;
+const PREVIEW_DELAY_MS = 220;
+const ERROR_COLORS: Record<string, string> = {
+  miss: THEME.judgment.miss,
+  boo: THEME.judgment.boo,
+  good: THEME.judgment.good,
+  ng: '#ff8a3d',
+  mine: THEME.mine,
+};
+
+type OptionKind = 'speed' | 'offset' | 'perspective' | 'assist' | 'rate' | 'hitms' | 'focus';
 
 export class SongSelectScreen {
-  private container: HTMLElement;
-  private allSongs: Song[] = [];
-  private packs: SongPack[] = [];
-  private selectedPackIndex: number = 0;
-  private selectedSongIndex: number = 0;
-  private selectedDifficultyIndex: number = 0;
-  private cmod: number = DEFAULT_SETTINGS.cmod;
-  private audioOffset: number = DEFAULT_SETTINGS.audioOffset;
-  private difficultyFilter: DifficultyFilter = 'All';
-  private activeColumn: 'packs' | 'songs' | 'difficulties' = 'packs';
-  private callbacks: SongSelectCallbacks;
-  private boundKeyHandler: (e: KeyboardEvent) => void;
-  private boundKeyUpHandler: (e: KeyboardEvent) => void;
-  private hasBeenShown: boolean = false;
-  private pendingRadarData: GrooveRadar | null = null;
-  private currentPreviewSongId: string | null = null;
-  private previewDebounceTimer: number | null = null;
-  private animationStartTime: number = performance.now();
-  private noteSkin: NoteSkin = DEFAULT_SETTINGS.noteSkin;
+  private readonly root: HTMLElement;
+  private all: SongEntry[] = [];
+  private list: SongEntry[] = [];
+  private query = '';
+  private index = 0;
+  private diff: Difficulty = 'Medium';
+  private wheelItems = new Map<string, HTMLElement>();
+  private previewTimer = 0;
+  private visible = false;
+  /** Section to loop, per song+difficulty */
+  private practice = new Map<string, PracticeRange>();
+  /** Loaded simfile + stats for the focused chart (null while loading) */
+  private loaded: { key: string; song: Song; chart: Chart; stats: ChartStats } | null = null;
 
-  // Multiplayer state
-  private isMultiplayerMode: boolean = false;
-  private isSpectatorMode: boolean = false; // True for guests (read-only)
-  private boundMultiplayerHandler: (event: MultiplayerEvent) => void;
-  private showingMultiplayerModal: boolean = false;
-
-  constructor(container: HTMLElement, callbacks: SongSelectCallbacks) {
-    this.container = container;
-    this.callbacks = callbacks;
-    this.boundKeyHandler = this.handleKey.bind(this);
-    this.boundKeyUpHandler = this.handleKeyUp.bind(this);
-    this.boundMultiplayerHandler = this.handleMultiplayerEvent.bind(this);
-    this.cmod = this.loadCmod();
-    this.audioOffset = this.loadAudioOffset();
-    this.noteSkin = this.loadNoteSkin();
-
-    // Listen to multiplayer events
-    multiplayerClient.addEventListener(this.boundMultiplayerHandler);
-  }
-
-  private loadCmod(): number {
-    const saved = localStorage.getItem('cmod');
-    if (saved !== null) {
-      const parsed = parseInt(saved, 10);
-      if (!isNaN(parsed) && parsed >= 0 && parsed <= 2000) return parsed;
-    }
-    return DEFAULT_SETTINGS.cmod;
-  }
-
-  private saveCmod(): void {
-    localStorage.setItem('cmod', this.cmod.toString());
-  }
-
-  private loadAudioOffset(): number {
-    const saved = localStorage.getItem('audioOffset');
-    if (saved !== null) {
-      const parsed = parseInt(saved, 10);
-      if (!isNaN(parsed)) return parsed;
-    }
-    return DEFAULT_SETTINGS.audioOffset;
-  }
-
-  private saveAudioOffset(): void {
-    localStorage.setItem('audioOffset', this.audioOffset.toString());
-  }
-
-  private loadNoteSkin(): NoteSkin {
-    const saved = localStorage.getItem('noteSkin');
-    if (saved !== null && NOTE_SKINS.includes(saved as NoteSkin)) {
-      return saved as NoteSkin;
-    }
-    return DEFAULT_SETTINGS.noteSkin;
-  }
-
-  private saveNoteSkin(): void {
-    localStorage.setItem('noteSkin', this.noteSkin);
-  }
-
-  // ============================================================================
-  // Multiplayer Mode
-  // ============================================================================
-
-  /**
-   * Update multiplayer mode state
-   */
-  updateMultiplayerMode(): void {
-    const room = multiplayerClient.getRoom();
-    this.isMultiplayerMode = room !== null;
-    this.isSpectatorMode = this.isMultiplayerMode && !multiplayerClient.isHost();
-  }
-
-  /**
-   * Handle multiplayer events
-   */
-  private handleMultiplayerEvent(event: MultiplayerEvent): void {
-    switch (event.type) {
-      case 'room-created':
-      case 'room-joined':
-        this.updateMultiplayerMode();
-        this.updateMultiplayerBar();
-        // If joining as guest, sync to host's current selection
-        if (event.type === 'room-joined' && this.isSpectatorMode) {
-          const navigation = (event.data as { hostNavigation?: HostNavigationState })?.hostNavigation;
-          if (navigation) {
-            this.applyHostNavigation(navigation);
-          }
-        }
-        break;
-
-      case 'host-navigation':
-        if (this.isSpectatorMode) {
-          this.applyHostNavigation(event.data as HostNavigationState);
-        }
-        break;
-
-      case 'room-updated':
-      case 'player-joined':
-      case 'player-left':
-        this.updateMultiplayerBar();
-        break;
-
-      case 'game-starting':
-        // Countdown started - will be handled by main.ts
-        break;
-    }
-  }
-
-  /**
-   * Apply host navigation state (for spectators)
-   */
-  private applyHostNavigation(navigation: HostNavigationState): void {
-    if (!this.isSpectatorMode) return;
-
-    let needsRender = false;
-
-    if (navigation.packIndex !== this.selectedPackIndex) {
-      this.selectedPackIndex = navigation.packIndex;
-      this.selectedSongIndex = 0;
-      needsRender = true;
-    }
-
-    if (navigation.songIndex !== this.selectedSongIndex) {
-      this.selectedSongIndex = navigation.songIndex;
-      needsRender = true;
-    }
-
-    if (needsRender) {
-      this.render();
-    }
-  }
-
-  /**
-   * Get current pack
-   */
-  private getCurrentPack(): SongPack | undefined {
-    return this.packs[this.selectedPackIndex];
-  }
-
-  /**
-   * Get current song
-   */
-  private getCurrentSong(): Song | undefined {
-    return this.getCurrentPack()?.songs[this.selectedSongIndex];
-  }
-
-  /**
-   * Get current chart
-   */
-  private getCurrentChart(): Chart | undefined {
-    return this.getCurrentSong()?.charts[this.selectedDifficultyIndex];
-  }
-
-  /**
-   * Broadcast navigation to guests (host only)
-   */
-  private broadcastNavigation(): void {
-    if (!this.isMultiplayerMode || this.isSpectatorMode) return;
-
-    const currentSong = this.getCurrentSong();
-    const currentChart = this.getCurrentChart();
-
-    const navigation: HostNavigationState = {
-      packIndex: this.selectedPackIndex,
-      songIndex: this.selectedSongIndex,
-    };
-
-    if (currentSong) {
-      navigation.songId = currentSong.id;
-    }
-    if (currentChart) {
-      navigation.difficulty = currentChart.difficulty;
-    }
-
-    multiplayerClient.sendHostNavigation(navigation);
-  }
-
-  /**
-   * Render multiplayer bar HTML
-   */
-  private renderMultiplayerBar(room: Room): string {
-    const isHost = multiplayerClient.isHost();
-    const localPlayerId = multiplayerClient.getPlayerId();
-
-    // Build player list with status
-    const playersHtml = room.players.map(p => {
-      const isLocal = p.id === localPlayerId;
-      const readyClass = p.isReady ? 'ready' : '';
-      const hostIcon = p.isHost ? '👑' : '';
-      const youMarker = isLocal ? ' (you)' : '';
-      return `<span class="mp-player ${readyClass}" title="${p.name}${youMarker}">${hostIcon}${escapeHtml(p.name)}</span>`;
-    }).join('');
-
-    const readyCount = room.players.filter(p => p.isHost || p.isReady).length;
-    const allReady = readyCount === room.players.length;
-
-    // For non-host: show ready toggle
-    const localPlayer = room.players.find(p => p.id === localPlayerId);
-    const isReady = localPlayer?.isReady ?? false;
-
-    return `
-      <div class="multiplayer-bar">
-        <div class="mp-info">
-          <div class="mp-room-code">
-            <span class="mp-label">ROOM</span>
-            <span class="mp-code">${room.code}</span>
-          </div>
-          <div class="mp-player-list">
-            ${playersHtml}
-            ${room.players.length < room.maxPlayers ? `<span class="mp-player empty">+${room.maxPlayers - room.players.length} slots</span>` : ''}
-          </div>
-        </div>
-        <div class="mp-controls">
-          ${isHost ? `
-            <div class="mp-ready-status ${allReady ? 'all-ready' : ''}">
-              ${allReady ? '✓ All ready' : `${readyCount}/${room.players.length} ready`}
-            </div>
-            <button class="mp-start-btn ${allReady && room.players.length >= 2 ? '' : 'disabled'}" ${allReady && room.players.length >= 2 ? '' : 'disabled'}>
-              Start Game
-            </button>
-          ` : `
-            <button class="mp-ready-btn ${isReady ? 'ready' : ''}">
-              ${isReady ? '✓ Ready' : 'Ready Up'}
-            </button>
-          `}
-          <button class="mp-share-btn" title="Copy room URL">📋</button>
-          <button class="mp-leave-btn" title="Leave room">✕</button>
-        </div>
-      </div>
-    `;
-  }
-
-  /**
-   * Update multiplayer indicator bar
-   */
-  private updateMultiplayerBar(): void {
-    const room = multiplayerClient.getRoom();
-    if (!room) return;
-    // Re-render to update player count etc
-    this.render();
-  }
-
-  /**
-   * Attach multiplayer bar event listeners
-   */
-  private attachMultiplayerBarListeners(): void {
-    const bar = this.container.querySelector('.multiplayer-bar');
-    if (!bar) return;
-
-    const room = multiplayerClient.getRoom();
-    if (!room) return;
-
-    // Share button
-    const shareBtn = bar.querySelector('.mp-share-btn');
-    shareBtn?.addEventListener('click', () => {
-      const url = new URL(window.location.href);
-      url.searchParams.set('room', room.code);
-      navigator.clipboard.writeText(url.toString());
-      if (shareBtn) shareBtn.textContent = '✓';
-      setTimeout(() => { if (shareBtn) shareBtn.textContent = '📋'; }, 1500);
+  constructor(
+    parent: HTMLElement,
+    private settings: Settings,
+    private readonly cb: SongSelectCallbacks
+  ) {
+    this.root = document.createElement('div');
+    this.root.className = 'select hidden';
+    this.root.innerHTML = `
+      <header class="select-top">
+        <div class="logo" aria-label="Stepmania 99"><span>STEPMANIA</span><b>99</b></div>
+        <label class="search"><kbd>/</kbd><input type="search" placeholder="Search songs, artists, packs" aria-label="Search songs" /><span class="search-count"></span></label>
+        <div class="select-room"></div>
+        <button class="btn btn-ghost" data-act="mp"><kbd>M</kbd> Multiplayer</button>
+      </header>
+      <section class="wheel" aria-label="Songs"><div class="wheel-track"></div><div class="wheel-focus"></div></section>
+      <section class="detail"></section>
+      <footer class="options glass"></footer>
+      <div class="select-empty hidden">
+        <h2>No songs yet</h2>
+        <p>Drop StepMania song folders (<code>.sm</code> or <code>.ssc</code> + audio) into <code>public/songs/&lt;Pack&gt;/&lt;Song&gt;/</code>, then run <code>npm run scan-songs</code>.</p>
+      </div>`;
+    parent.appendChild(this.root);
+    this.root.querySelector('[data-act="mp"]')!.addEventListener('click', () => this.openMultiplayer());
+    this.root.querySelector('.wheel')!.addEventListener(
+      'wheel',
+      (e) => {
+        e.preventDefault();
+        this.move(Math.sign((e as WheelEvent).deltaY));
+      },
+      { passive: false }
+    );
+    const search = this.searchInput;
+    search.addEventListener('input', () => this.applySearch(search.value));
+    search.addEventListener('keydown', (e) => {
+      if (e.code === 'Escape') {
+        search.value = '';
+        this.applySearch('');
+        search.blur();
+      } else if (e.code === 'Enter' || e.code === 'ArrowDown' || e.code === 'ArrowUp') {
+        search.blur();
+      }
+      e.stopPropagation();
     });
-
-    // Leave button
-    const leaveBtn = bar.querySelector('.mp-leave-btn');
-    leaveBtn?.addEventListener('click', () => {
-      multiplayerClient.leaveRoom();
-      this.isMultiplayerMode = false;
-      this.isSpectatorMode = false;
-      const url = new URL(window.location.href);
-      url.searchParams.delete('room');
-      window.history.replaceState({}, '', url.toString());
-      this.render();
-    });
-
-    // Ready button (for non-host players)
-    const readyBtn = bar.querySelector('.mp-ready-btn');
-    readyBtn?.addEventListener('click', () => {
-      multiplayerClient.toggleReady();
-    });
-
-    // Start game button (for host)
-    const startBtn = bar.querySelector('.mp-start-btn');
-    startBtn?.addEventListener('click', () => {
-      // Select the current song/chart before starting
-      const currentSong = this.getCurrentSong();
-      const currentChart = this.getCurrentChart();
-      if (currentSong && currentChart) {
-        multiplayerClient.selectSong(currentSong.id, currentChart.difficulty);
-        multiplayerClient.startGame();
-      }
-    });
+    multiplayerClient.addEventListener(this.onMultiplayer);
   }
 
-  /**
-   * Show multiplayer modal (create/join room)
-   */
-  showMultiplayerModal(): void {
-    if (this.showingMultiplayerModal) return;
-    this.showingMultiplayerModal = true;
-
-    const modal = document.createElement('div');
-    modal.className = 'mp-modal-overlay';
-    modal.innerHTML = `
-      <div class="mp-modal">
-        <h2>Multiplayer</h2>
-
-        <div class="mp-section">
-          <h3>Create Room</h3>
-          <div class="mp-input-row">
-            <input type="text" id="mp-create-name" placeholder="Your name" maxlength="20" />
-            <button id="mp-create-btn" class="mp-btn mp-btn-primary">Create</button>
-          </div>
-        </div>
-
-        <div class="mp-divider"><span>OR</span></div>
-
-        <div class="mp-section">
-          <h3>Join Room</h3>
-          <div class="mp-input-row">
-            <input type="text" id="mp-join-name" placeholder="Your name" maxlength="20" />
-            <input type="text" id="mp-join-code" placeholder="Room code" maxlength="8" style="width: 100px; text-transform: uppercase;" />
-            <button id="mp-join-btn" class="mp-btn mp-btn-secondary">Join</button>
-          </div>
-        </div>
-
-        <div class="mp-error hidden" id="mp-error"></div>
-
-        <button id="mp-close-btn" class="mp-close">✕</button>
-      </div>
-    `;
-
-    document.body.appendChild(modal);
-
-    // Event listeners
-    const closeModal = () => {
-      modal.remove();
-      this.showingMultiplayerModal = false;
-    };
-
-    modal.querySelector('#mp-close-btn')?.addEventListener('click', closeModal);
-    modal.addEventListener('click', (e) => {
-      if (e.target === modal) closeModal();
-    });
-
-    const showError = (msg: string) => {
-      const errorEl = modal.querySelector('#mp-error');
-      if (errorEl) {
-        errorEl.textContent = msg;
-        errorEl.classList.remove('hidden');
-        setTimeout(() => errorEl.classList.add('hidden'), 3000);
-      }
-    };
-
-    // Create room
-    modal.querySelector('#mp-create-btn')?.addEventListener('click', async () => {
-      const nameInput = modal.querySelector('#mp-create-name') as HTMLInputElement;
-      const name = nameInput?.value.trim();
-      if (!name) {
-        showError('Please enter your name');
-        return;
-      }
-
-      try {
-        await multiplayerClient.connect();
-        multiplayerClient.createRoom(name);
-        // Don't close modal yet - wait for room-created event
-      } catch {
-        showError('Failed to connect to server');
-      }
-    });
-
-    // Join room
-    modal.querySelector('#mp-join-btn')?.addEventListener('click', async () => {
-      const nameInput = modal.querySelector('#mp-join-name') as HTMLInputElement;
-      const codeInput = modal.querySelector('#mp-join-code') as HTMLInputElement;
-      const name = nameInput?.value.trim();
-      const code = codeInput?.value.trim().toUpperCase();
-
-      if (!name) {
-        showError('Please enter your name');
-        return;
-      }
-      if (!code || code.length !== 8) {
-        showError('Room code must be 8 characters');
-        return;
-      }
-
-      try {
-        await multiplayerClient.connect();
-        multiplayerClient.joinRoom(code, name);
-        // Don't close modal yet - wait for room-joined event
-      } catch {
-        showError('Failed to connect to server');
-      }
-    });
-
-    // Listen for room events to close modal
-    const handleRoomEvent = (event: MultiplayerEvent) => {
-      if (event.type === 'room-created' || event.type === 'room-joined') {
-        closeModal();
-        // URL will be updated by the existing handler
-      } else if (event.type === 'error') {
-        showError(event.data as string);
-      }
-    };
-
-    multiplayerClient.addEventListener(handleRoomEvent);
-
-    // Clean up listener when modal closes
-    const originalClose = closeModal;
-    const newCloseModal = () => {
-      multiplayerClient.removeEventListener(handleRoomEvent);
-      originalClose();
-    };
-    modal.querySelector('#mp-close-btn')?.removeEventListener('click', closeModal);
-    modal.querySelector('#mp-close-btn')?.addEventListener('click', newCloseModal);
+  private get searchInput(): HTMLInputElement {
+    return this.root.querySelector('.search input') as HTMLInputElement;
   }
 
-  /**
-   * Join room directly (called from URL with room code)
-   */
-  async joinRoomFromUrl(roomCode: string): Promise<void> {
-    // Show a simple name input modal
-    const name = prompt('Enter your name to join the room:');
-    if (!name || !name.trim()) return;
+  // --------------------------------------------------------------------------
+  // Lifecycle
+  // --------------------------------------------------------------------------
 
-    try {
-      await multiplayerClient.connect();
-      multiplayerClient.joinRoom(roomCode, name.trim());
-    } catch {
-      alert('Failed to connect to server');
+  show(entries: SongEntry[], settings: Settings): void {
+    this.settings = settings;
+    if (entries !== this.all) {
+      this.all = [...entries].sort((a, b) => a.pack.localeCompare(b.pack) || a.title.localeCompare(b.title));
+      this.applySearch(this.query, false);
     }
-  }
-
-  show(songs: Song[]): void {
-    const songsChanged = this.allSongs.length !== songs.length;
-    this.allSongs = songs;
-    this.applyFilter();
-
-    // Update multiplayer state
-    this.updateMultiplayerMode();
-
-    // Only reset position on first show or if songs changed
-    if (!this.hasBeenShown || songsChanged) {
-      this.selectedPackIndex = 0;
-      this.selectedSongIndex = 0;
-      this.selectedDifficultyIndex = 0;
-      this.activeColumn = 'packs';
-      this.hasBeenShown = true;
-    } else {
-      // Validate indices are still in range
-      this.selectedPackIndex = Math.min(this.selectedPackIndex, Math.max(0, this.packs.length - 1));
-      const currentPack = this.packs[this.selectedPackIndex];
-      if (currentPack) {
-        this.selectedSongIndex = Math.min(this.selectedSongIndex, Math.max(0, currentPack.songs.length - 1));
-        const currentSong = currentPack.songs[this.selectedSongIndex];
-        if (currentSong) {
-          this.selectedDifficultyIndex = Math.min(this.selectedDifficultyIndex, Math.max(0, currentSong.charts.length - 1));
-        }
-      }
-    }
-
-    this.render();
-    window.addEventListener('keydown', this.boundKeyHandler);
-    window.addEventListener('keyup', this.boundKeyUpHandler);
+    this.visible = true;
+    this.root.classList.remove('hidden');
+    this.root.querySelector('.select-empty')!.classList.toggle('hidden', this.all.length > 0);
+    window.addEventListener('keydown', this.onKey);
+    this.renderAll();
+    this.queuePreview();
   }
 
   hide(): void {
-    window.removeEventListener('keydown', this.boundKeyHandler);
-    window.removeEventListener('keyup', this.boundKeyUpHandler);
-    this.container.innerHTML = '';
-    this.stopPreview();
+    this.visible = false;
+    this.root.classList.add('hidden');
+    window.removeEventListener('keydown', this.onKey);
+    clearTimeout(this.previewTimer);
   }
 
-  private playPreview(song: Song): void {
-    // Don't replay if it's the same song
-    if (this.currentPreviewSongId === song.id) return;
-
-    // Clear any pending preview load
-    if (this.previewDebounceTimer !== null) {
-      clearTimeout(this.previewDebounceTimer);
-    }
-
-    // Debounce: wait 50ms before loading to avoid loading while fast-scrolling
-    this.previewDebounceTimer = window.setTimeout(async () => {
-      // Double-check we still want this song
-      if (this.currentPreviewSongId === song.id) return;
-
-      this.currentPreviewSongId = song.id;
-
-      try {
-        // Build audio path
-        const audioPath = song.basePath
-          ? `${song.basePath}/${song.musicFile}`
-          : `songs/${song.id}/${song.musicFile}`;
-
-        await audioManager.load(audioPath);
-
-        // Verify this is still the song we want (user may have navigated away during load)
-        if (this.currentPreviewSongId !== song.id) return;
-
-        // Start at preview time (previewStart is already in seconds)
-        audioManager.play(song.previewStart ?? 0);
-        audioManager.setVolume(0.5); // Lower volume for preview
-      } catch (error) {
-        console.warn('Failed to play preview:', error);
-      }
-    }, 150);
+  get current(): { entry: SongEntry; meta: ChartMeta } | null {
+    const entry = this.list[this.index];
+    if (!entry) return null;
+    return { entry, meta: this.chartFor(entry) };
   }
 
-  private stopPreview(): void {
-    if (this.previewDebounceTimer !== null) {
-      clearTimeout(this.previewDebounceTimer);
-      this.previewDebounceTimer = null;
-    }
-    audioManager.stop();
-    this.currentPreviewSongId = null;
+  private chartFor(entry: SongEntry): ChartMeta {
+    // Closest available difficulty to the one the player is browsing with
+    const want = DIFFS.indexOf(this.diff);
+    return [...entry.charts].sort((a, b) => Math.abs(DIFFS.indexOf(a.difficulty) - want) - Math.abs(DIFFS.indexOf(b.difficulty) - want))[0]!;
   }
 
-  private applyFilter(): void {
-    const minDifficultyIndex = this.getMinDifficultyIndex();
-    const filteredSongs = this.allSongs.map(song => {
-      if (minDifficultyIndex === 0) {
-        // Sort charts by level ascending
-        return { ...song, charts: [...song.charts].sort((a, b) => a.level - b.level) };
-      }
-      const filteredCharts = song.charts.filter(chart => {
-        const chartDiffIndex = DIFFICULTY_ORDER.indexOf(chart.difficulty as typeof DIFFICULTY_ORDER[number]);
-        return chartDiffIndex >= minDifficultyIndex;
-      });
-      if (filteredCharts.length === 0) return null;
-      // Sort charts by level ascending
-      return { ...song, charts: filteredCharts.sort((a, b) => a.level - b.level) };
-    }).filter((song): song is Song => song !== null);
-    this.packs = this.organizeSongsIntoPacks(filteredSongs);
+  private get isGuest(): boolean {
+    return multiplayerClient.getRoom() !== null && !multiplayerClient.isHost();
   }
 
-  private getMinDifficultyIndex(): number {
-    switch (this.difficultyFilter) {
-      case 'All': return 0;
-      case 'Easy+': return 1;
-      case 'Medium+': return 2;
-      case 'Hard+': return 3;
-      case 'Challenge': return 4;
-      default: return 0;
+  private applySearch(q: string, render = true): void {
+    const keepId = this.list[this.index]?.id;
+    this.query = q;
+    const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
+    this.list = terms.length
+      ? this.all.filter((e) => {
+          const hay = `${e.title} ${e.subtitle ?? ''} ${e.artist} ${e.pack}`.toLowerCase();
+          return terms.every((t) => hay.includes(t));
+        })
+      : this.all;
+    const keep = keepId ? this.list.findIndex((e) => e.id === keepId) : -1;
+    this.index = keep >= 0 ? keep : 0;
+    (this.root.querySelector('.search-count') as HTMLElement).textContent = terms.length ? `${this.list.length}` : `${this.all.length}`;
+    this.wheelItems.forEach((el) => el.remove());
+    this.wheelItems.clear();
+    if (render && this.visible) {
+      this.renderWheel();
+      this.renderDetail();
+      this.queuePreview();
     }
   }
 
-  private setGlowSpeed(multiplier: number): void {
-    document.documentElement.style.setProperty('--glow-speed', `${2 / multiplier}s`);
-  }
+  // --------------------------------------------------------------------------
+  // Input
+  // --------------------------------------------------------------------------
 
-  private handleKeyUp(e: KeyboardEvent): void {
-    if (e.code === 'Tab') {
-      e.preventDefault();
-      this.setGlowSpeed(1);
-    }
-  }
-
-  private cycleDifficultyFilter(direction: number): void {
-    const currentIndex = DIFFICULTY_FILTERS.indexOf(this.difficultyFilter);
-    let newIndex = currentIndex + direction;
-    if (newIndex < 0) newIndex = DIFFICULTY_FILTERS.length - 1;
-    if (newIndex >= DIFFICULTY_FILTERS.length) newIndex = 0;
-    this.difficultyFilter = DIFFICULTY_FILTERS[newIndex]!;
-    this.applyFilter();
-    this.selectedPackIndex = Math.min(this.selectedPackIndex, Math.max(0, this.packs.length - 1));
-    this.selectedSongIndex = 0;
-    this.selectedDifficultyIndex = 0;
-    this.render();
-  }
-
-  private organizeSongsIntoPacks(songs: Song[]): SongPack[] {
-    const packMap = new Map<string, Song[]>();
-    for (const song of songs) {
-      const packName = song.pack || 'Uncategorized';
-      if (!packMap.has(packName)) packMap.set(packName, []);
-      packMap.get(packName)!.push(song);
-    }
-    // Sort packs alphabetically, and songs within each pack alphabetically
-    return Array.from(packMap.entries())
-      .map(([name, packSongs]) => ({
-        name,
-        songs: packSongs.sort((a, b) => a.title.localeCompare(b.title))
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-  }
-
-  private handleKey(e: KeyboardEvent): void {
-    // Spectators can't navigate (read-only mode)
-    if (this.isSpectatorMode) {
-      // Allow Escape to leave room
-      if (e.code === 'Escape') {
-        e.preventDefault();
-        multiplayerClient.leaveRoom();
-        this.isMultiplayerMode = false;
-        this.isSpectatorMode = false;
-        const url = new URL(window.location.href);
-        url.searchParams.delete('room');
-        window.history.replaceState({}, '', url.toString());
-        this.render();
-      }
-      return;
-    }
-
-    const currentPack = this.packs[this.selectedPackIndex];
-    const currentSong = currentPack?.songs[this.selectedSongIndex];
-
+  private onKey = (e: KeyboardEvent) => {
+    if (!this.visible || (e.target as HTMLElement)?.tagName === 'INPUT') return;
+    const nav = !this.isGuest;
+    const solo = !multiplayerClient.getRoom();
     switch (e.code) {
       case 'ArrowUp':
-        e.preventDefault();
-        if (this.activeColumn === 'packs' && this.packs.length > 0) {
-          this.selectedPackIndex = this.selectedPackIndex <= 0
-            ? this.packs.length - 1  // Wrap to end
-            : this.selectedPackIndex - 1;
-          this.selectedSongIndex = 0;
-          this.selectedDifficultyIndex = 0;
-          this.render();
-          this.broadcastNavigation();
-        } else if (this.activeColumn === 'songs' && currentPack && currentPack.songs.length > 0) {
-          this.selectedSongIndex = this.selectedSongIndex <= 0
-            ? currentPack.songs.length - 1  // Wrap to end
-            : this.selectedSongIndex - 1;
-          this.selectedDifficultyIndex = 0;
-          this.render();
-          this.broadcastNavigation();
-        } else if (this.activeColumn === 'difficulties' && currentSong) {
-          this.selectedDifficultyIndex = Math.max(0, this.selectedDifficultyIndex - 1);
-          this.render();
-          this.broadcastNavigation();
-        }
+        if (nav) this.move(-1);
         break;
-
       case 'ArrowDown':
-        e.preventDefault();
-        if (this.activeColumn === 'packs' && this.packs.length > 0) {
-          this.selectedPackIndex = this.selectedPackIndex >= this.packs.length - 1
-            ? 0  // Wrap to start
-            : this.selectedPackIndex + 1;
-          this.selectedSongIndex = 0;
-          this.selectedDifficultyIndex = 0;
-          this.render();
-          this.broadcastNavigation();
-        } else if (this.activeColumn === 'songs' && currentPack && currentPack.songs.length > 0) {
-          this.selectedSongIndex = this.selectedSongIndex >= currentPack.songs.length - 1
-            ? 0  // Wrap to start
-            : this.selectedSongIndex + 1;
-          this.selectedDifficultyIndex = 0;
-          this.render();
-          this.broadcastNavigation();
-        } else if (this.activeColumn === 'difficulties' && currentSong) {
-          this.selectedDifficultyIndex = Math.min(currentSong.charts.length - 1, this.selectedDifficultyIndex + 1);
-          this.render();
-          this.broadcastNavigation();
-        }
+        if (nav) this.move(1);
         break;
-
+      case 'PageUp':
+        if (nav) this.jumpPack(-1);
+        break;
+      case 'PageDown':
+        if (nav) this.jumpPack(1);
+        break;
       case 'ArrowLeft':
-        e.preventDefault();
-        if (this.activeColumn === 'difficulties') {
-          this.activeColumn = 'songs';
-        } else if (this.activeColumn === 'songs') {
-          this.activeColumn = 'packs';
-        } else {
-          this.cycleDifficultyFilter(-1);
-        }
-        this.render();
+        this.changeDiff(-1);
         break;
-
       case 'ArrowRight':
-        e.preventDefault();
-        if (this.activeColumn === 'packs' && currentPack && currentPack.songs.length > 0) {
-          this.activeColumn = 'songs';
-        } else if (this.activeColumn === 'songs' && currentSong && currentSong.charts.length > 0) {
-          this.activeColumn = 'difficulties';
-        } else if (this.activeColumn === 'packs') {
-          this.cycleDifficultyFilter(1);
-        }
-        this.render();
+        this.changeDiff(1);
         break;
-
+      case 'Slash':
+      case 'KeyF':
+        if (e.code === 'KeyF' && !(e.ctrlKey || e.metaKey)) return;
+        this.searchInput.focus();
+        this.searchInput.select();
+        break;
       case 'Enter':
-        e.preventDefault();
-        if (currentSong) {
-          const chart = currentSong.charts[this.selectedDifficultyIndex];
-          if (chart) {
-            // In multiplayer mode, host starts game via WebSocket
-            if (this.isMultiplayerMode) {
-              multiplayerClient.selectSong(currentSong.id, chart.difficulty);
-              multiplayerClient.startGame();
-            } else {
-              this.callbacks.onSongSelect(currentSong, chart, { cmod: this.cmod, audioOffset: this.audioOffset, noteSkin: this.noteSkin });
-            }
-          }
-        }
+        if (!e.repeat && solo) this.play(e.shiftKey);
         break;
+      case 'KeyA':
+        if (!e.repeat && solo) this.play(true);
+        break;
+      case 'KeyS':
+        if (!e.repeat && solo) this.startPractice();
+        break;
+      case 'Backspace':
+      case 'Delete':
+        this.clearPractice();
+        break;
+      case 'Minus':
+        this.option('speed', -1);
+        break;
+      case 'Equal':
+        this.option('speed', 1);
+        break;
+      case 'BracketLeft':
+        this.option('offset', -1);
+        break;
+      case 'BracketRight':
+        this.option('offset', 1);
+        break;
+      case 'Comma':
+        if (solo) this.option('rate', -1);
+        break;
+      case 'Period':
+        if (solo) this.option('rate', 1);
+        break;
+      case 'KeyP':
+        this.option('perspective', 1);
+        break;
+      case 'KeyT':
+        this.option('assist', 1);
+        break;
+      case 'KeyH':
+        this.option('hitms', 1);
+        break;
+      case 'KeyV':
+        this.option('focus', 1);
+        break;
+      case 'KeyC':
+        if (solo) this.cb.onCalibrate();
+        break;
+      case 'KeyM':
+        this.openMultiplayer();
+        break;
+      default:
+        return;
+    }
+    e.preventDefault();
+  };
 
-      case 'Tab':
-        e.preventDefault();
-        this.setGlowSpeed(3);
-        break;
+  private move(delta: number): void {
+    if (this.list.length === 0 || this.isGuest) return;
+    const next = (((this.index + delta) % this.list.length) + this.list.length) % this.list.length;
+    if (next === this.index) return;
+    this.index = next;
+    audio.play1('ui-move', { gain: 0.6 });
+    this.renderWheel();
+    this.renderDetail();
+    this.queuePreview();
+    this.broadcast();
+  }
 
-      case 'KeyD':
-        e.preventDefault();
-        if (currentSong && this.callbacks.onDemo) {
-          const chart = currentSong.charts[this.selectedDifficultyIndex];
-          if (chart) {
-            this.callbacks.onDemo(currentSong, chart, { cmod: this.cmod, audioOffset: this.audioOffset, noteSkin: this.noteSkin });
-          }
-        }
-        break;
+  private jumpPack(dir: number): void {
+    const n = this.list.length;
+    if (n === 0) return;
+    const packOf = (i: number) => this.list[((i % n) + n) % n]!.pack;
+    const cur = packOf(this.index);
+    let i = this.index;
+    for (let k = 0; k < n && packOf(i) === cur; k++) i += dir;
+    // Land on the first song of that pack
+    const target = packOf(i);
+    for (let k = 0; k < n && packOf(i - 1) === target; k++) i--;
+    this.move((((i - this.index) % n) + n) % n);
+  }
 
-      case 'Escape':
-        e.preventDefault();
-        if (this.activeColumn === 'difficulties') {
-          this.activeColumn = 'songs';
-          this.render();
-        } else if (this.activeColumn === 'songs') {
-          this.activeColumn = 'packs';
-          this.render();
-        }
-        break;
+  private changeDiff(dir: number): void {
+    const cur = this.current;
+    if (!cur) return;
+    const available = cur.entry.charts.map((c) => c.difficulty);
+    const pos = available.indexOf(cur.meta.difficulty);
+    const next = available[Math.max(0, Math.min(available.length - 1, pos + dir))]!;
+    if (next === cur.meta.difficulty) return;
+    this.diff = next;
+    audio.play1('ui-change', { gain: 0.7 });
+    this.renderDetail();
+    this.renderWheel();
+    this.broadcast();
+  }
 
-      case 'Equal': // + key (adjust offset up by 5ms)
-      case 'NumpadAdd':
-        e.preventDefault();
-        this.audioOffset += 5;
-        this.saveAudioOffset();
-        this.render();
-        break;
+  private play(autoplay: boolean): void {
+    const cur = this.current;
+    if (!cur) return;
+    audio.play1('ui-start');
+    this.cb.onPlay(cur.entry, cur.meta.difficulty, autoplay);
+  }
 
-      case 'Minus': // - key (adjust offset down by 5ms)
-      case 'NumpadSubtract':
-        e.preventDefault();
-        this.audioOffset -= 5;
-        this.saveAudioOffset();
-        this.render();
-        break;
+  private practiceKey(): string | null {
+    const cur = this.current;
+    return cur ? `${cur.entry.id}::${cur.meta.difficulty}` : null;
+  }
+
+  /** Loop the selected section, or the whole chart when nothing is selected */
+  private startPractice(): void {
+    const cur = this.current;
+    const key = this.practiceKey();
+    if (!cur || !key) return;
+    const range = this.practice.get(key) ?? (this.loaded?.key === key ? { from: this.loaded.stats.startMs, to: this.loaded.stats.endMs } : null);
+    if (!range) return;
+    audio.play1('ui-start');
+    this.cb.onPlay(cur.entry, cur.meta.difficulty, false, range);
+  }
+
+  private clearPractice(): void {
+    const key = this.practiceKey();
+    if (key && this.practice.delete(key)) {
+      audio.play1('ui-back', { gain: 0.6 });
+      this.drawDensity();
     }
   }
 
-  private render(): void {
-    const currentPack = this.packs[this.selectedPackIndex];
-    const currentSong = currentPack?.songs[this.selectedSongIndex];
-    const currentChart = currentSong?.charts[this.selectedDifficultyIndex];
+  private option(kind: OptionKind, dir: number): void {
+    const s = { ...this.settings };
+    const step = (opts: readonly number[], cur: number, fallback: number) => {
+      const i = opts.indexOf(cur);
+      return opts[Math.max(0, Math.min(opts.length - 1, (i < 0 ? fallback : i) + dir))]!;
+    };
+    if (kind === 'speed') s.cmod = step(CMOD_OPTIONS, s.cmod, 8);
+    else if (kind === 'offset') s.offsetMs = Math.max(-300, Math.min(300, s.offsetMs + dir * 5));
+    else if (kind === 'rate') s.rate = step(RATE_OPTIONS, s.rate, RATE_OPTIONS.indexOf(1));
+    else if (kind === 'perspective') s.perspective = s.perspective === 'flat' ? 'tilted' : 'flat';
+    else if (kind === 'assist') s.assistTick = !s.assistTick;
+    else if (kind === 'hitms') s.showHitMs = !s.showHitMs;
+    else s.focus = !s.focus;
+    this.settings = s;
+    audio.play1('ui-change', { gain: 0.7 });
+    this.cb.onSettings(s);
+    this.renderOptions();
+  }
 
-    // Calculate animation delay to keep animations synced across re-renders
-    const elapsedMs = performance.now() - this.animationStartTime;
-    const glowDurationMs = 2000; // Match --glow-speed default
-    const shimmerDurationMs = 3000; // play-button-shimmer duration
-    const arcAnimationDelay = -(elapsedMs % glowDurationMs);
-    const shimmerAnimationDelay = -(elapsedMs % shimmerDurationMs);
+  private async openMultiplayer(): Promise<void> {
+    if (multiplayerClient.getRoom()) return;
+    audio.play1('ui-select');
+    window.removeEventListener('keydown', this.onKey);
+    await openMultiplayerModal();
+    if (this.visible) window.addEventListener('keydown', this.onKey);
+    this.renderAll();
+  }
 
+  async joinFromUrl(code: string): Promise<void> {
+    window.removeEventListener('keydown', this.onKey);
+    await openMultiplayerModal(code);
+    if (this.visible) window.addEventListener('keydown', this.onKey);
+    this.renderAll();
+  }
+
+  // --------------------------------------------------------------------------
+  // Multiplayer sync
+  // --------------------------------------------------------------------------
+
+  private broadcast(): void {
+    if (!multiplayerClient.getRoom() || !multiplayerClient.isHost()) return;
+    const cur = this.current;
+    const nav: HostNavigationState = { packIndex: 0, songIndex: this.index };
+    if (cur) {
+      nav.songId = cur.entry.id;
+      nav.difficulty = cur.meta.difficulty;
+    }
+    multiplayerClient.sendHostNavigation(nav);
+  }
+
+  private onMultiplayer = (e: MultiplayerEvent) => {
+    const joinedNav = e.type === 'room-joined' ? (e.data as { hostNavigation?: HostNavigationState })?.hostNavigation : undefined;
+    if (e.type === 'host-navigation' || joinedNav) {
+      if (!this.isGuest) return;
+      const nav = joinedNav ?? (e.data as HostNavigationState);
+      if (nav.songId && !this.list.some((s) => s.id === nav.songId)) this.applySearch('', false);
+      const i = nav.songId ? this.list.findIndex((s) => s.id === nav.songId) : -1;
+      if (i >= 0) this.index = i;
+      if (nav.difficulty) this.diff = nav.difficulty;
+      if (this.visible) {
+        this.renderWheel();
+        this.renderDetail();
+        this.queuePreview();
+      }
+    }
+    if (['room-created', 'room-joined', 'room-updated', 'player-joined', 'player-left', 'connection-changed'].includes(e.type) && this.visible) {
+      this.renderRoom();
+      this.renderOptions();
+      this.renderDetail();
+      if (e.type === 'room-created') this.broadcast();
+    }
+  };
+
+  // --------------------------------------------------------------------------
+  // Rendering
+  // --------------------------------------------------------------------------
+
+  private renderAll(): void {
+    this.renderRoom();
+    this.renderWheel();
+    this.renderDetail();
+    this.renderOptions();
+  }
+
+  private renderRoom(): void {
+    const el = this.root.querySelector('.select-room') as HTMLElement;
     const room = multiplayerClient.getRoom();
-    const mpBarHtml = room ? this.renderMultiplayerBar(room) : '';
+    el.innerHTML = room ? roomBarHtml(room) : '';
+    (this.root.querySelector('[data-act="mp"]') as HTMLElement).classList.toggle('hidden', !!room);
+    if (room)
+      bindRoomBar(
+        el,
+        () => {
+          const c = this.current;
+          return c ? { songId: c.entry.id, difficulty: c.meta.difficulty } : null;
+        },
+        () => this.renderAll()
+      );
+  }
 
-    this.container.innerHTML = `
-      <div class="song-select-4col ${this.isSpectatorMode ? 'spectator-mode' : ''}" style="--arc-animation-delay: ${arcAnimationDelay}ms; --shimmer-animation-delay: ${shimmerAnimationDelay}ms">
-        ${mpBarHtml}
-        <div class="header">
-          <h1 class="title">${this.isMultiplayerMode ? 'MULTIPLAYER' : 'SELECT SONG'}</h1>
-          <div class="header-actions">
-            ${!this.isMultiplayerMode ? `
-              <button id="multiplayer-btn" class="multiplayer-btn" ${this.callbacks.onMultiplayer ? '' : 'disabled'}>
-                <span class="mp-icon">⚔</span> Multiplayer
-              </button>
-            ` : ''}
-            <a href="https://stepmaniaonline.net/" target="_blank" rel="noopener" class="download-packs-link">
-              Download Packs ↗
-            </a>
-          </div>
+  private renderWheel(): void {
+    const track = this.root.querySelector('.wheel-track') as HTMLElement;
+    const n = this.list.length;
+    const keep = new Set<string>();
+    for (let k = -WHEEL_SPAN; k <= WHEEL_SPAN && n > 0; k++) {
+      if (n < 2 * WHEEL_SPAN + 1 && Math.abs(k) > Math.floor(n / 2)) continue;
+      const i = (((this.index + k) % n) + n) % n;
+      const entry = this.list[i]!;
+      if (keep.has(entry.id)) continue;
+      keep.add(entry.id);
+      let el = this.wheelItems.get(entry.id);
+      if (!el) {
+        el = this.wheelItem(entry);
+        track.appendChild(el);
+        this.wheelItems.set(entry.id, el);
+        // enter from the edge it scrolls in from
+        el.style.transform = this.wheelTransform(k + Math.sign(k || 1));
+        el.style.opacity = '0';
+        void el.offsetWidth;
+      }
+      el.style.transform = this.wheelTransform(k);
+      el.style.opacity = String(Math.max(0, 1 - Math.abs(k) * 0.14));
+      el.style.zIndex = String(100 - Math.abs(k));
+      el.classList.toggle('active', k === 0);
+      const meta = this.chartFor(entry);
+      const best = getBest(entry.id, meta.difficulty);
+      const level = el.querySelector('.wi-level') as HTMLElement;
+      level.textContent = String(meta.level);
+      level.dataset.diff = meta.difficulty;
+      const grade = el.querySelector('.wi-grade') as HTMLElement;
+      grade.textContent = best?.grade ?? '';
+      grade.dataset.grade = best?.grade ?? '';
+    }
+    for (const [id, el] of this.wheelItems) {
+      if (!keep.has(id)) {
+        el.remove();
+        this.wheelItems.delete(id);
+      }
+    }
+  }
+
+  private wheelTransform(k: number): string {
+    // The focused item sits flush in the track; neighbours recede to the left along an arc
+    const angle = k * 9;
+    const y = k * 78;
+    const x = -Math.abs(k) * Math.abs(k) * 4;
+    const s = 1 - Math.min(0.24, Math.abs(k) * 0.035);
+    return `translate3d(${x}px, ${y}px, 0) rotateX(${-angle}deg) scale(${s})`;
+  }
+
+  private wheelItem(entry: SongEntry): HTMLElement {
+    const el = document.createElement('button');
+    el.className = 'wheel-item';
+    el.innerHTML = `
+      <span class="wi-pack">${escapeHtml(entry.pack)}</span>
+      <span class="wi-title">${escapeHtml(entry.title)}</span>
+      <span class="wi-artist">${escapeHtml(entry.artist)}</span>
+      <span class="wi-level"></span>
+      <span class="wi-grade"></span>`;
+    el.addEventListener('click', () => {
+      const i = this.list.indexOf(entry);
+      if (i === this.index) this.play(false);
+      else if (i >= 0) this.move(i - this.index);
+    });
+    return el;
+  }
+
+  private renderDetail(): void {
+    const el = this.root.querySelector('.detail') as HTMLElement;
+    const cur = this.current;
+    if (!cur) {
+      el.innerHTML = this.query ? `<div class="detail-none">No song matches "${escapeHtml(this.query)}".</div>` : '';
+      return;
+    }
+    const { entry, meta } = cur;
+    const best = getBest(entry.id, meta.difficulty);
+    const dir = songDir(entry);
+    const art = assetUrl(dir, entry.jacket) ?? assetUrl(dir, entry.background) ?? assetUrl(dir, entry.banner);
+    const bpmText = Math.round(entry.bpmMin) === Math.round(entry.bpmMax) ? `${Math.round(entry.bpmMin)}` : `${Math.round(entry.bpmMin)}–${Math.round(entry.bpmMax)}`;
+    const inRoom = !!multiplayerClient.getRoom();
+
+    el.innerHTML = `
+      <div class="jacket" style="${art ? `--art: url(&quot;${art}&quot;)` : ''}">
+        <div class="jacket-art"></div>
+        ${entry.silent ? '<span class="jacket-tag">NO AUDIO · DRILL</span>' : ''}
+      </div>
+      <div class="detail-head">
+        <div class="detail-pack">${escapeHtml(entry.pack)}</div>
+        <h1 class="detail-title">${escapeHtml(entry.title)}</h1>
+        ${entry.subtitle ? `<div class="detail-sub">${escapeHtml(entry.subtitle)}</div>` : ''}
+        <div class="detail-artist">${escapeHtml(entry.artist)}</div>
+        <div class="detail-meta"><span><b>${bpmText}</b> BPM</span><span class="meta-len"><b>–:––</b></span><span><b>${meta.steps}</b> steps</span></div>
+      </div>
+      <div class="ladder" role="listbox" aria-label="Difficulty">
+        ${DIFFS.map((d) => {
+          const c = entry.charts.find((x) => x.difficulty === d);
+          const b = c ? getBest(entry.id, d) : null;
+          return `<button class="rung ${c ? '' : 'empty'} ${d === meta.difficulty ? 'active' : ''}" data-diff="${d}" ${c ? '' : 'disabled'}>
+            <span class="rung-name">${d}</span><span class="rung-level">${c ? c.level : '–'}</span><span class="rung-grade" data-grade="${b?.grade ?? ''}">${b?.grade ?? ''}</span>
+          </button>`;
+        }).join('')}
+      </div>
+      <div class="chart-panel glass">
+        <div class="chart-best">
+          ${best
+            ? `<div class="best-grade" data-grade="${best.grade}">${best.grade}</div><div><div class="best-score">${best.score.toLocaleString('en-US')}</div><div class="best-sub">${best.percentage.toFixed(2)}% · ${best.maxCombo} max combo${best.fullCombo ? ' · <b>FC</b>' : ''}</div></div>`
+            : '<div class="best-none">Not played yet. Clear it to set a record.</div>'}
+          <div class="density-legend"></div>
         </div>
-
-        <div class="columns">
-          <!-- Packs Column -->
-          <div class="column packs-column ${this.activeColumn === 'packs' ? 'active' : ''}">
-            <div class="column-list">
-              <div class="wheel-border"></div>
-              <div class="wheel-viewport" style="--item-height: 44px; --total-items: ${this.packs.length}; --selected-idx: ${this.selectedPackIndex}">
-                <div class="wheel-container" style="top: calc(50% - var(--item-height) / 2); transform: translateY(calc((var(--total-items) * var(--item-height) + var(--selected-idx) * var(--item-height)) * -1))">
-                  ${this.packs.length === 0 ? '<div class="empty">No songs</div>' : (() => {
-                    // Render 3 copies: before separator, main, after separator
-                    const renderPack = (pack: SongPack, realIndex: number, virtualOffset: number) => {
-                      const offset = virtualOffset - this.selectedPackIndex;
-                      const absOffset = Math.abs(offset);
-                      const rotateX = offset * -3;
-                      const translateZ = -absOffset * 5;
-                      const opacity = Math.max(0.35, 1 - absOffset * 0.1);
-                      const scale = Math.max(0.9, 1 - absOffset * 0.02);
-                      return `
-                        <div class="list-item wheel-item ${virtualOffset === this.selectedPackIndex ? 'selected' : ''}"
-                             data-pack="${realIndex}"
-                             style="transform: rotateX(${rotateX}deg) translateZ(${translateZ}px) scale(${scale}); opacity: ${opacity};">
-                          <span class="item-icon">📁</span>
-                          <span class="item-name">${escapeHtml(pack.name)}</span>
-                          <span class="item-count">${pack.songs.length}</span>
-                        </div>
-                      `;
-                    };
-                    const n = this.packs.length;
-                    // Previous cycle (negative offsets)
-                    const prevCycle = this.packs.map((pack, i) => renderPack(pack, i, i - n)).join('');
-                    // Main cycle
-                    const mainCycle = this.packs.map((pack, i) => renderPack(pack, i, i)).join('');
-                    // Next cycle (positive offsets beyond n)
-                    const nextCycle = this.packs.map((pack, i) => renderPack(pack, i, i + n)).join('');
-                    return prevCycle + mainCycle + nextCycle;
-                  })()}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Songs Column -->
-          <div class="column songs-column ${this.activeColumn === 'songs' ? 'active' : ''}">
-            <div class="column-list">
-              <div class="wheel-border"></div>
-              <div class="wheel-viewport" style="--item-height: 56px; --total-items: ${currentPack?.songs.length || 0}; --selected-idx: ${this.selectedSongIndex}">
-                <div class="wheel-container" style="top: calc(50% - var(--item-height) / 2); transform: translateY(calc((var(--total-items) * var(--item-height) + var(--selected-idx) * var(--item-height)) * -1))">
-                  ${!currentPack ? '<div class="empty">Select a pack</div>' : (() => {
-                    const songs = currentPack.songs;
-                    const renderSong = (song: Song, realIndex: number, virtualOffset: number) => {
-                      const offset = virtualOffset - this.selectedSongIndex;
-                      const absOffset = Math.abs(offset);
-                      const rotateX = offset * -3;
-                      const translateZ = -absOffset * 5;
-                      const opacity = Math.max(0.35, 1 - absOffset * 0.1);
-                      const scale = Math.max(0.9, 1 - absOffset * 0.02);
-                      const grades = song.charts.map(c => getScore(song.id, c.difficulty)).filter(Boolean);
-                      const bestGrade = grades.length > 0 ? grades.sort((a, b) => {
-                        const order = ['AAAA', 'AAA', 'AA', 'A', 'B', 'C', 'D'];
-                        return order.indexOf(a!.grade) - order.indexOf(b!.grade);
-                      })[0] : null;
-                      return `
-                        <div class="list-item wheel-item ${virtualOffset === this.selectedSongIndex ? 'selected' : ''}"
-                             data-song="${realIndex}"
-                             style="transform: rotateX(${rotateX}deg) translateZ(${translateZ}px) scale(${scale}); opacity: ${opacity};">
-                          <div class="song-row">
-                            <span class="item-name">${escapeHtml(song.title)}</span>
-                            ${bestGrade ? `<span class="best-grade grade-${bestGrade.grade.toLowerCase()}">${bestGrade.grade}</span>` : ''}
-                          </div>
-                          <div class="song-meta">
-                            <span class="artist">${escapeHtml(song.artist)}</span>
-                          </div>
-                        </div>
-                      `;
-                    };
-                    const n = songs.length;
-                    const prevCycle = songs.map((song, i) => renderSong(song, i, i - n)).join('');
-                    const mainCycle = songs.map((song, i) => renderSong(song, i, i)).join('');
-                    const nextCycle = songs.map((song, i) => renderSong(song, i, i + n)).join('');
-                    return prevCycle + mainCycle + nextCycle;
-                  })()}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Difficulties Column -->
-          <div class="column difficulties-column ${this.activeColumn === 'difficulties' ? 'active' : ''}">
-            <div class="column-list">
-              <div class="wheel-border"></div>
-              <div class="wheel-viewport" style="--item-height: 52px; --selected-idx: ${this.selectedDifficultyIndex}; --ghost-count: 8">
-                <div class="wheel-container" style="top: calc(50% - var(--item-height) / 2); transform: translateY(calc((var(--ghost-count) + var(--selected-idx)) * var(--item-height) * -1))">
-                  ${!currentSong ? '<div class="empty">Select a song</div>' : (() => {
-                    const ghostsBefore = Array(8).fill(0).map((_, i) => {
-                      const offset = -(8 - i) - this.selectedDifficultyIndex;
-                      const rotateX = offset * -3;
-                      return `<div class="wheel-ghost wheel-item" style="transform: rotateX(${rotateX}deg);"></div>`;
-                    }).join('');
-
-                    const items = currentSong.charts.map((chart, i) => {
-                      const offset = i - this.selectedDifficultyIndex;
-                      const absOffset = Math.abs(offset);
-                      const rotateX = offset * -3;
-                      const translateZ = -absOffset * 5;
-                      const opacity = Math.max(0.35, 1 - absOffset * 0.1);
-                      const scale = Math.max(0.9, 1 - absOffset * 0.02);
-                      const chartScore = getScore(currentSong.id, chart.difficulty);
-                      return `
-                        <div class="list-item wheel-item diff-item ${i === this.selectedDifficultyIndex ? 'selected' : ''}"
-                             data-diff-idx="${i}"
-                             style="transform: rotateX(${rotateX}deg) translateZ(${translateZ}px) scale(${scale}); opacity: ${opacity};">
-                          <div class="diff-row">
-                            <span class="diff-name" data-diff="${chart.difficulty}">${chart.difficulty}</span>
-                            <span class="diff-level">Lv.${chart.level}</span>
-                          </div>
-                          ${chartScore ? `
-                            <div class="diff-score">
-                              <span class="diff-grade grade-${chartScore.grade.toLowerCase()}">${chartScore.grade}</span>
-                              <span class="diff-score-value">${chartScore.score.toLocaleString()}</span>
-                            </div>
-                          ` : '<div class="diff-no-score">No play</div>'}
-                        </div>
-                      `;
-                    }).join('');
-
-                    const ghostsAfter = Array(8).fill(0).map((_, i) => {
-                      const offset = currentSong.charts.length + i - this.selectedDifficultyIndex;
-                      const rotateX = offset * -3;
-                      return `<div class="wheel-ghost wheel-item" style="transform: rotateX(${rotateX}deg);"></div>`;
-                    }).join('');
-
-                    return ghostsBefore + items + ghostsAfter;
-                  })()}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Stats Column -->
-          <div class="column stats-column">
-            ${currentChart ? this.renderChartDetails(currentSong!, currentChart) : '<div class="empty">Select a difficulty</div>'}
-          </div>
+        <div class="density-wrap" title="Drag to pick a section to practice">
+          <canvas class="density" aria-label="Note density over time"></canvas>
+          <div class="density-range hidden"></div>
         </div>
-
-        <div class="footer">
-          <div class="settings-row">
-            ${this.renderCmodSelector()}
-            ${this.renderOffsetSelector()}
-            ${this.renderSkinSelector()}
-          </div>
-          <div class="nav-hint">
-            <span>↑↓ Navigate</span>
-            <span>←→ Columns</span>
-            <span>ENTER Play</span>
-            <span class="demo-hint">D Demo</span>
-            <span class="glow-hint">TAB Turbo</span>
-          </div>
+        <div class="chart-row">
+          <svg class="radar" viewBox="-60 -60 120 120" aria-label="Groove radar"></svg>
+          <dl class="chart-stats"></dl>
         </div>
       </div>
-      ${this.getStyles()}
-    `;
+      <div class="play-cta">
+        ${inRoom
+          ? this.isGuest ? '<span class="cta-wait">Waiting for the host…</span>' : '<span class="cta-wait">Start the battle from the room bar</span>'
+          : `<button class="btn btn-play" data-act="play"><kbd>Enter</kbd> Play</button>
+             <button class="btn btn-ghost" data-act="practice"><kbd>S</kbd> Practice</button>
+             <button class="btn btn-ghost" data-act="demo"><kbd>A</kbd> Autoplay</button>`}
+      </div>`;
 
-    this.addClickHandlers();
-    this.drawGrooveRadar();
-    this.scrollSelectedIntoView();
+    el.querySelectorAll<HTMLElement>('.rung:not(.empty)').forEach((r) =>
+      r.addEventListener('click', () => {
+        this.diff = r.dataset.diff as Difficulty;
+        audio.play1('ui-change', { gain: 0.7 });
+        this.renderDetail();
+        this.renderWheel();
+        this.broadcast();
+      })
+    );
+    el.querySelector('[data-act="play"]')?.addEventListener('click', () => this.play(false));
+    el.querySelector('[data-act="demo"]')?.addEventListener('click', () => this.play(true));
+    el.querySelector('[data-act="practice"]')?.addEventListener('click', () => this.startPractice());
+    this.bindRangeDrag(el.querySelector('.density-wrap') as HTMLElement);
 
-    // Play song preview
-    if (currentSong) {
-      this.playPreview(currentSong);
+    const key = `${entry.id}::${meta.difficulty}`;
+    if (this.loaded?.key === key) this.fillStats();
+    else {
+      this.loaded = null;
+      loadSong(entry)
+        .then((song) => {
+          const chart = song.charts.find((c) => c.difficulty === meta.difficulty) ?? song.charts[0]!;
+          const cur2 = this.current;
+          if (!cur2 || `${cur2.entry.id}::${cur2.meta.difficulty}` !== key) return;
+          this.loaded = { key, song, chart, stats: chartStats(chart) };
+          this.fillStats();
+        })
+        .catch((e) => console.warn(e));
     }
   }
 
-  /**
-   * No-op: 3D wheel handles positioning automatically via CSS transforms
-   */
-  private scrollSelectedIntoView(): void {
-    // The 3D wheel rotates to show selected items - no scrolling needed
+  /** Second pass once the simfile is parsed: length, density, radar, counts */
+  private fillStats(): void {
+    const l = this.loaded;
+    if (!l) return;
+    const el = this.root.querySelector('.detail') as HTMLElement;
+    const st = l.stats;
+    (el.querySelector('.meta-len') as HTMLElement).innerHTML = `<b>${Math.floor(st.durationSec / 60)}:${String(Math.round(st.durationSec % 60)).padStart(2, '0')}</b>`;
+    (el.querySelector('.radar') as SVGElement).innerHTML = this.radarSvg(st.radar);
+    (el.querySelector('.chart-stats') as HTMLElement).innerHTML = `
+      <div><dt>Jumps</dt><dd>${st.jumps}</dd></div>
+      <div><dt>Freezes</dt><dd>${st.holds}</dd></div>
+      <div><dt>Rolls</dt><dd>${st.rolls}</dd></div>
+      <div><dt>Mines</dt><dd>${st.mines}</dd></div>
+      <div><dt>Avg NPS</dt><dd>${st.avgNps.toFixed(1)}</dd></div>
+      <div><dt>Peak NPS</dt><dd>${st.peakNps.toFixed(1)}</dd></div>`;
+    this.drawDensity();
   }
 
-  private drawGrooveRadar(): void {
-    if (!this.pendingRadarData) return;
+  private bindRangeDrag(wrap: HTMLElement): void {
+    let start: number | null = null;
+    const toMs = (clientX: number): number | null => {
+      const l = this.loaded;
+      if (!l) return null;
+      const r = wrap.getBoundingClientRect();
+      const k = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+      return l.stats.startMs + k * (l.stats.endMs - l.stats.startMs);
+    };
+    wrap.addEventListener('pointerdown', (e) => {
+      start = toMs(e.clientX);
+      if (start !== null) wrap.setPointerCapture(e.pointerId);
+    });
+    wrap.addEventListener('pointermove', (e) => {
+      const key = this.practiceKey();
+      const cur = toMs(e.clientX);
+      if (start === null || cur === null || !key) return;
+      this.practice.set(key, { from: Math.min(start, cur), to: Math.max(start, cur) });
+      this.drawDensity();
+    });
+    wrap.addEventListener('pointerup', () => {
+      const key = this.practiceKey();
+      const r = key ? this.practice.get(key) : undefined;
+      // A click without a real drag clears the selection
+      if (key && r && r.to - r.from < 1500) this.practice.delete(key);
+      start = null;
+      this.drawDensity();
+    });
+  }
 
-    const canvas = document.getElementById('groove-radar') as HTMLCanvasElement;
-    if (!canvas) return;
+  private radarSvg(v: number[]): string {
+    const axes = ['STREAM', 'VOLTAGE', 'AIR', 'FREEZE', 'CHAOS'];
+    const pt = (i: number, r: number) => {
+      const a = -Math.PI / 2 + (i * 2 * Math.PI) / 5;
+      return `${(Math.cos(a) * r).toFixed(1)},${(Math.sin(a) * r).toFixed(1)}`;
+    };
+    const ring = (r: number) => `<polygon class="radar-ring" points="${axes.map((_, i) => pt(i, r)).join(' ')}"/>`;
+    return `${ring(42)}${ring(28)}${ring(14)}
+      <polygon class="radar-shape" points="${v.map((x, i) => pt(i, 4 + x * 38)).join(' ')}"/>
+      ${axes.map((a, i) => { const [x, y] = pt(i, 52).split(','); return `<text x="${x}" y="${y}">${a}</text>`; }).join('')}`;
+  }
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const radar = this.pendingRadarData;
-    const size = canvas.width;
-    const centerX = size / 2;
-    const centerY = size / 2;
-    const radius = size * 0.32;
-
-    // Clear canvas
-    ctx.clearRect(0, 0, size, size);
-
-    // Radar dimensions - 5 axes for pentagon
-    const dimensions = [
-      { label: 'STREAM', value: radar.stream, angle: -Math.PI / 2 },
-      { label: 'VOLTAGE', value: radar.voltage, angle: -Math.PI / 2 + (2 * Math.PI / 5) },
-      { label: 'AIR', value: radar.air, angle: -Math.PI / 2 + (4 * Math.PI / 5) },
-      { label: 'FREEZE', value: radar.freeze, angle: -Math.PI / 2 + (6 * Math.PI / 5) },
-      { label: 'CHAOS', value: radar.chaos, angle: -Math.PI / 2 + (8 * Math.PI / 5) },
-    ];
-
-    // Draw background grid (concentric pentagons)
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
-    ctx.lineWidth = 1;
-
-    for (let level = 0.25; level <= 1; level += 0.25) {
-      ctx.beginPath();
-      for (let i = 0; i <= dimensions.length; i++) {
-        const dim = dimensions[i % dimensions.length]!;
-        const x = centerX + Math.cos(dim.angle) * radius * level;
-        const y = centerY + Math.sin(dim.angle) * radius * level;
-        if (i === 0) {
-          ctx.moveTo(x, y);
-        } else {
-          ctx.lineTo(x, y);
-        }
-      }
-      ctx.closePath();
-      ctx.stroke();
-    }
-
-    // Draw axis lines
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
-    for (const dim of dimensions) {
-      ctx.beginPath();
-      ctx.moveTo(centerX, centerY);
-      ctx.lineTo(
-        centerX + Math.cos(dim.angle) * radius,
-        centerY + Math.sin(dim.angle) * radius
-      );
-      ctx.stroke();
-    }
-
-    // Draw filled radar shape with gradient
-    const gradient = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, radius);
-    gradient.addColorStop(0, 'rgba(0, 212, 255, 0.8)');
-    gradient.addColorStop(1, 'rgba(255, 0, 170, 0.6)');
-
+  /** Density curve + last run's errors + the practice section */
+  private drawDensity(): void {
+    const canvas = this.root.querySelector('.density') as HTMLCanvasElement | null;
+    const l = this.loaded;
+    const cur = this.current;
+    if (!canvas || !l || !cur) return;
+    const { ctx, w, h } = fitCanvas(canvas);
+    const st = l.stats;
+    const max = Math.max(8, ...st.density);
+    const color = getComputedStyle(this.root).getPropertyValue(`--diff-${cur.meta.difficulty.toLowerCase()}`).trim() || '#22e7ff';
+    const grad = ctx.createLinearGradient(0, 0, 0, h);
+    grad.addColorStop(0, color);
+    grad.addColorStop(1, 'transparent');
     ctx.beginPath();
-    for (let i = 0; i <= dimensions.length; i++) {
-      const dim = dimensions[i % dimensions.length]!;
-      const value = dim.value / 100;
-      const x = centerX + Math.cos(dim.angle) * radius * value;
-      const y = centerY + Math.sin(dim.angle) * radius * value;
-      if (i === 0) {
-        ctx.moveTo(x, y);
-      } else {
-        ctx.lineTo(x, y);
-      }
-    }
+    ctx.moveTo(0, h);
+    st.density.forEach((d, i) => ctx.lineTo((i / Math.max(1, st.density.length - 1)) * w, h - (d / max) * (h - 8)));
+    ctx.lineTo(w, h);
     ctx.closePath();
-    ctx.fillStyle = gradient;
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = grad;
     ctx.fill();
-
-    // Draw radar outline
-    ctx.strokeStyle = 'rgba(0, 212, 255, 0.9)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    for (let i = 0; i <= dimensions.length; i++) {
-      const dim = dimensions[i % dimensions.length]!;
-      const value = dim.value / 100;
-      const x = centerX + Math.cos(dim.angle) * radius * value;
-      const y = centerY + Math.sin(dim.angle) * radius * value;
-      if (i === 0) {
-        ctx.moveTo(x, y);
-      } else {
-        ctx.lineTo(x, y);
-      }
-    }
-    ctx.closePath();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
     ctx.stroke();
 
-    // Draw data points
-    for (const dim of dimensions) {
-      const value = dim.value / 100;
-      const x = centerX + Math.cos(dim.angle) * radius * value;
-      const y = centerY + Math.sin(dim.angle) * radius * value;
-
-      ctx.beginPath();
-      ctx.arc(x, y, 4, 0, Math.PI * 2);
-      ctx.fillStyle = '#00d4ff';
-      ctx.fill();
-      ctx.strokeStyle = '#fff';
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
+    const x = (t: number) => ((t - st.startMs) / Math.max(1, st.endMs - st.startMs)) * w;
+    const errors = getLastRunErrors(cur.entry.id, cur.meta.difficulty) ?? [];
+    for (const e of errors) {
+      const tall = e.kind === 'miss' || e.kind === 'ng' || e.kind === 'mine';
+      ctx.fillStyle = ERROR_COLORS[e.kind] ?? '#fff';
+      ctx.globalAlpha = e.kind === 'good' ? 0.55 : 0.9;
+      ctx.fillRect(Math.round(x(e.time)) - 1, tall ? 0 : h * 0.35, 2, tall ? h : h * 0.65);
     }
+    ctx.globalAlpha = 1;
+    const legend = this.root.querySelector('.density-legend') as HTMLElement;
+    const count = (k: string) => errors.filter((e) => e.kind === k).length;
+    legend.innerHTML = errors.length
+      ? `<span>Last run</span>${['miss', 'ng', 'boo', 'good']
+          .filter((k) => count(k))
+          .map((k) => `<i style="--c:${ERROR_COLORS[k]}">${count(k)} ${k === 'ng' ? 'N.G.' : k}</i>`)
+          .join('')}`
+      : '';
 
-    // Draw labels
-    ctx.font = 'bold 11px -apple-system, BlinkMacSystemFont, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-
-    for (const dim of dimensions) {
-      const labelRadius = radius + 25;
-      const x = centerX + Math.cos(dim.angle) * labelRadius;
-      const y = centerY + Math.sin(dim.angle) * labelRadius;
-
-      // Label background
-      const metrics = ctx.measureText(dim.label);
-      const padding = 4;
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
-      ctx.fillRect(
-        x - metrics.width / 2 - padding,
-        y - 7 - padding,
-        metrics.width + padding * 2,
-        14 + padding * 2
-      );
-
-      // Label text
-      ctx.fillStyle = '#fff';
-      ctx.fillText(dim.label, x, y);
-
-      // Value below label
-      ctx.font = 'bold 10px -apple-system, BlinkMacSystemFont, sans-serif';
-      ctx.fillStyle = '#00d4ff';
-      ctx.fillText(`${dim.value}`, x, y + 13);
-      ctx.font = 'bold 11px -apple-system, BlinkMacSystemFont, sans-serif';
+    const range = this.root.querySelector('.density-range') as HTMLElement;
+    const key = this.practiceKey();
+    const r = key ? this.practice.get(key) : undefined;
+    range.classList.toggle('hidden', !r);
+    if (r) {
+      range.style.left = `${(x(r.from) / w) * 100}%`;
+      range.style.width = `${((x(r.to) - x(r.from)) / w) * 100}%`;
+      const secs = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.floor((ms / 1000) % 60)).padStart(2, '0')}`;
+      range.dataset.label = `${secs(r.from)}–${secs(r.to)} · S to loop`;
     }
   }
 
-  private renderChartDetails(song: Song, chart: Chart): string {
-    const stats = calculateChartStats(chart.notes);
-    const bestScore = getScore(song.id, chart.difficulty);
-
-    // Store radar data for canvas drawing after render
-    this.pendingRadarData = calculateGrooveRadar(chart.notes, stats.durationSec);
-
-    const formatDuration = (sec: number) => {
-      const min = Math.floor(sec / 60);
-      const s = Math.floor(sec % 60);
-      return `${min}:${s.toString().padStart(2, '0')}`;
-    };
-
-    return `
-      <div class="chart-details">
-        <div class="chart-header">
-          <div class="title-row">
-            <h2 class="song-title">${escapeHtml(song.title)}</h2>
-            <span class="song-duration">${formatDuration(stats.durationSec)}</span>
-            <button class="play-button">
-              <span class="play-icon">▶</span>
-              <span class="play-text">ENTER TO PLAY</span>
-            </button>
-          </div>
-          <div class="song-artist">${escapeHtml(song.artist)}</div>
-          <div class="chart-info-row">
-            <span class="diff-badge" data-diff="${chart.difficulty}">${chart.difficulty} Lv.${chart.level}</span>
-            <span class="song-bpm">${formatBpm(song)}</span>
-          </div>
-        </div>
-
-        ${bestScore ? `
-          <div class="best-score-section">
-            <div class="section-title">BEST SCORE</div>
-            <div class="best-score-row">
-              <span class="best-grade-large grade-${bestScore.grade.toLowerCase()}">${bestScore.grade}</span>
-              <div class="best-details">
-                <div class="best-score-value">${bestScore.score.toLocaleString()}</div>
-                <div class="best-meta">
-                  <span>Combo: ${bestScore.maxCombo}</span>
-                  <span>Acc: ${bestScore.accuracy.toFixed(1)}%</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        ` : `
-          <div class="no-score">No score yet</div>
-        `}
-
-        <div class="radar-section">
-          <div class="radar-container">
-            <canvas id="groove-radar" class="radar-canvas" width="280" height="280"></canvas>
-          </div>
-        </div>
-
-        <div class="stats-section">
-          <div class="stats-grid">
-            <div class="stat-item">
-              <span class="stat-value">${stats.totalNotes}</span>
-              <span class="stat-label">Steps</span>
-            </div>
-            <div class="stat-item">
-              <span class="stat-value">${stats.taps}</span>
-              <span class="stat-label">Taps</span>
-            </div>
-            <div class="stat-item">
-              <span class="stat-value">${stats.jumps}</span>
-              <span class="stat-label">Jumps</span>
-            </div>
-            <div class="stat-item">
-              <span class="stat-value">${stats.hands}</span>
-              <span class="stat-label">Hands</span>
-            </div>
-            <div class="stat-item">
-              <span class="stat-value">${stats.nps}</span>
-              <span class="stat-label">Avg NPS</span>
-            </div>
-            <div class="stat-item">
-              <span class="stat-value">${stats.peakNps}</span>
-              <span class="stat-label">Peak NPS</span>
-            </div>
-          </div>
-        </div>
-      </div>
-    `;
+  private renderOptions(): void {
+    const el = this.root.querySelector('.options') as HTMLElement;
+    const s = this.settings;
+    const inRoom = !!multiplayerClient.getRoom();
+    el.innerHTML = `
+      <button class="opt" data-opt="speed"><span class="opt-k"><kbd>−</kbd><kbd>=</kbd></span><span class="opt-l">Speed</span><b>C${s.cmod}</b></button>
+      <button class="opt ${s.rate !== 1 ? 'warn' : ''}" data-opt="rate" ${inRoom ? 'disabled' : ''}><span class="opt-k"><kbd>,</kbd><kbd>.</kbd></span><span class="opt-l">Rate</span><b>${s.rate.toFixed(2)}×</b></button>
+      <button class="opt" data-opt="offset"><span class="opt-k"><kbd>[</kbd><kbd>]</kbd></span><span class="opt-l">Offset</span><b>${s.offsetMs > 0 ? '+' : ''}${s.offsetMs} ms</b></button>
+      <button class="opt" data-opt="calibrate" ${inRoom ? 'disabled' : ''}><span class="opt-k"><kbd>C</kbd></span><span class="opt-l">Calibrate</span><b>Tap test</b></button>
+      <button class="opt" data-opt="perspective"><span class="opt-k"><kbd>P</kbd></span><span class="opt-l">View</span><b>${s.perspective === 'flat' ? 'Classic' : 'Highway'}</b></button>
+      <button class="opt" data-opt="assist"><span class="opt-k"><kbd>T</kbd></span><span class="opt-l">Assist tick</span><b>${s.assistTick ? 'On' : 'Off'}</b></button>
+      <button class="opt" data-opt="focus"><span class="opt-k"><kbd>V</kbd></span><span class="opt-l">Effects</span><b>${s.focus ? 'Focus' : 'Full'}</b></button>
+      <button class="opt" data-opt="hitms"><span class="opt-k"><kbd>H</kbd></span><span class="opt-l">Hit ms</span><b>${s.showHitMs ? 'Every hit' : 'Off'}</b></button>
+      <div class="opt-hints"><span><kbd>↑</kbd><kbd>↓</kbd> song</span><span><kbd>←</kbd><kbd>→</kbd> difficulty</span><span><kbd>PgUp</kbd><kbd>PgDn</kbd> pack</span><span><kbd>/</kbd> search</span></div>`;
+    el.querySelectorAll<HTMLElement>('[data-opt]').forEach((b) =>
+      b.addEventListener('click', (e) => {
+        const o = b.dataset.opt!;
+        const dir = (e as MouseEvent).shiftKey ? -1 : 1;
+        if (o === 'calibrate') this.cb.onCalibrate();
+        else this.option(o as OptionKind, dir);
+      })
+    );
   }
 
-  private renderCmodSelector(): string {
-    const displayValue = this.cmod === 0 ? 'BPM' : `C${this.cmod}`;
-    return `
-      <div class="cmod-selector">
-        <span class="label">Speed:</span>
-        <button class="cmod-btn" data-cmod-delta="-50">−</button>
-        <div class="cmod-value">${displayValue}</div>
-        <button class="cmod-btn" data-cmod-delta="50">+</button>
-      </div>
-    `;
-  }
-
-  private renderOffsetSelector(): string {
-    return `
-      <div class="offset-selector">
-        <span class="label">Offset:</span>
-        <button class="offset-btn" data-offset-delta="-5">−</button>
-        <div class="offset-value">${this.audioOffset}ms</div>
-        <button class="offset-btn" data-offset-delta="5">+</button>
-      </div>
-    `;
-  }
-
-  private renderSkinSelector(): string {
-    const skinLabels: Record<NoteSkin, string> = {
-      arrows: '↑ Arrows',
-      gems: '● Gems (alpha)',
-    };
-    return `
-      <div class="skin-selector">
-        <span class="label">Skin:</span>
-        <button class="skin-btn" data-skin-prev>◀</button>
-        <div class="skin-value">${skinLabels[this.noteSkin]}</div>
-        <button class="skin-btn" data-skin-next>▶</button>
-      </div>
-    `;
-  }
-
-  private addClickHandlers(): void {
-    // Pack clicks
-    this.container.querySelectorAll('[data-pack]').forEach(el => {
-      el.addEventListener('click', () => {
-        this.selectedPackIndex = parseInt((el as HTMLElement).dataset.pack!, 10);
-        this.selectedSongIndex = 0;
-        this.selectedDifficultyIndex = 0;
-        this.activeColumn = 'songs';
-        this.render();
-      });
-    });
-
-    // Song clicks
-    this.container.querySelectorAll('[data-song]').forEach(el => {
-      el.addEventListener('click', () => {
-        this.selectedSongIndex = parseInt((el as HTMLElement).dataset.song!, 10);
-        this.selectedDifficultyIndex = 0;
-        this.activeColumn = 'songs';
-        this.render();
-      });
-    });
-
-    // Difficulty clicks
-    this.container.querySelectorAll('[data-diff-idx]').forEach(el => {
-      el.addEventListener('click', () => {
-        this.selectedDifficultyIndex = parseInt((el as HTMLElement).dataset.diffIdx!, 10);
-        this.activeColumn = 'difficulties';
-        this.render();
-      });
-    });
-
-    // CMod button clicks
-    this.container.querySelectorAll('[data-cmod-delta]').forEach(el => {
-      el.addEventListener('click', () => {
-        const delta = parseInt((el as HTMLElement).dataset.cmodDelta!, 10);
-        this.cmod = Math.max(0, Math.min(2000, this.cmod + delta));
-        this.saveCmod();
-        this.render();
-      });
-    });
-
-    // Offset button clicks
-    this.container.querySelectorAll('[data-offset-delta]').forEach(el => {
-      el.addEventListener('click', () => {
-        const delta = parseInt((el as HTMLElement).dataset.offsetDelta!, 10);
-        this.audioOffset += delta;
-        this.saveAudioOffset();
-        this.render();
-      });
-    });
-
-    // Skin selector button clicks
-    const skinPrev = this.container.querySelector('[data-skin-prev]');
-    const skinNext = this.container.querySelector('[data-skin-next]');
-    const cycleSkin = (direction: number) => {
-      const currentIdx = NOTE_SKINS.indexOf(this.noteSkin);
-      const newIdx = (currentIdx + direction + NOTE_SKINS.length) % NOTE_SKINS.length;
-      this.noteSkin = NOTE_SKINS[newIdx]!;
-      this.saveNoteSkin();
-      this.render();
-    };
-    skinPrev?.addEventListener('click', () => cycleSkin(-1));
-    skinNext?.addEventListener('click', () => cycleSkin(1));
-
-    // Multiplayer button click - open modal directly
-    const mpBtn = this.container.querySelector('#multiplayer-btn');
-    if (mpBtn) {
-      mpBtn.addEventListener('click', () => {
-        this.showMultiplayerModal();
-      });
-    }
-
-    // Play button click
-    const playBtn = this.container.querySelector('.play-button');
-    if (playBtn) {
-      playBtn.addEventListener('click', () => {
-        const currentPack = this.packs[this.selectedPackIndex];
-        const currentSong = currentPack?.songs[this.selectedSongIndex];
-        if (currentSong) {
-          const chart = currentSong.charts[this.selectedDifficultyIndex];
-          if (chart) {
-            // In multiplayer mode, host starts game via WebSocket
-            if (this.isMultiplayerMode && !this.isSpectatorMode) {
-              multiplayerClient.selectSong(currentSong.id, chart.difficulty);
-              multiplayerClient.startGame();
-            } else if (!this.isMultiplayerMode) {
-              this.callbacks.onSongSelect(currentSong, chart, { cmod: this.cmod, audioOffset: this.audioOffset, noteSkin: this.noteSkin });
-            }
-            // Spectators can't start game
-          }
-        }
-      });
-    }
-
-    // Multiplayer bar listeners
-    this.attachMultiplayerBarListeners();
-  }
-
-  private getStyles(): string {
-    return `<style>
-      .song-select-4col {
-        position: fixed;
-        inset: 0;
-        display: flex;
-        flex-direction: column;
-        background: ${THEME.bg.primary};
-        color: ${THEME.text.primary};
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-        padding: 1.5rem;
-      }
-
-      /* Spectator mode - subtle overlay effect */
-      .song-select-4col.spectator-mode .columns {
-        pointer-events: none;
-        opacity: 0.9;
-      }
-
-      /* Multiplayer bar */
-      .multiplayer-bar {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        background: linear-gradient(135deg, rgba(255, 0, 170, 0.12), rgba(0, 212, 255, 0.12));
-        border: 1px solid rgba(255, 0, 170, 0.4);
-        border-radius: 8px;
-        padding: 0.6rem 1rem;
-        margin-bottom: 1rem;
-        gap: 1rem;
-      }
-
-      .mp-info {
-        display: flex;
-        align-items: center;
-        gap: 1.5rem;
-        flex: 1;
-      }
-
-      .mp-room-code {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-      }
-
-      .mp-label {
-        font-size: 0.65rem;
-        color: ${THEME.text.muted};
-        letter-spacing: 0.1em;
-      }
-
-      .mp-code {
-        font-family: 'SF Mono', Monaco, monospace;
-        font-size: 1rem;
-        font-weight: 700;
-        color: ${THEME.accent.primary};
-        letter-spacing: 0.15em;
-        background: rgba(0, 212, 255, 0.1);
-        padding: 0.25rem 0.5rem;
-        border-radius: 4px;
-      }
-
-      .mp-player-list {
-        display: flex;
-        gap: 0.5rem;
-        flex-wrap: wrap;
-      }
-
-      .mp-player {
-        font-size: 0.8rem;
-        padding: 0.25rem 0.6rem;
-        background: ${THEME.bg.tertiary};
-        border-radius: 4px;
-        color: ${THEME.text.secondary};
-        transition: all 0.2s;
-      }
-
-      .mp-player.ready {
-        background: rgba(0, 255, 136, 0.15);
-        color: #00ff88;
-        border: 1px solid rgba(0, 255, 136, 0.3);
-      }
-
-      .mp-player.empty {
-        color: ${THEME.text.muted};
-        font-style: italic;
-        border: 1px dashed ${THEME.bg.tertiary};
-        background: transparent;
-      }
-
-      .mp-controls {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-      }
-
-      .mp-ready-status {
-        font-size: 0.8rem;
-        color: ${THEME.text.secondary};
-        padding: 0 0.5rem;
-      }
-
-      .mp-ready-status.all-ready {
-        color: #00ff88;
-        font-weight: 600;
-      }
-
-      .mp-ready-btn {
-        padding: 0.5rem 1rem;
-        border: 1px solid ${THEME.text.secondary};
-        background: transparent;
-        color: ${THEME.text.secondary};
-        border-radius: 6px;
-        font-size: 0.85rem;
-        font-weight: 600;
-        cursor: pointer;
-        transition: all 0.2s;
-      }
-
-      .mp-ready-btn:hover {
-        border-color: #00ff88;
-        color: #00ff88;
-      }
-
-      .mp-ready-btn.ready {
-        background: rgba(0, 255, 136, 0.15);
-        border-color: #00ff88;
-        color: #00ff88;
-      }
-
-      .mp-start-btn {
-        padding: 0.5rem 1.25rem;
-        background: linear-gradient(135deg, ${THEME.accent.secondary}, #ff4488);
-        border: none;
-        border-radius: 6px;
-        color: white;
-        font-size: 0.85rem;
-        font-weight: 700;
-        cursor: pointer;
-        transition: all 0.2s;
-      }
-
-      .mp-start-btn:hover:not(.disabled) {
-        transform: translateY(-1px);
-        box-shadow: 0 4px 15px rgba(255, 0, 170, 0.4);
-      }
-
-      .mp-start-btn.disabled {
-        opacity: 0.4;
-        cursor: not-allowed;
-      }
-
-      .mp-share-btn, .mp-leave-btn {
-        width: 32px;
-        height: 32px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        border-radius: 6px;
-        border: none;
-        cursor: pointer;
-        transition: all 0.2s ease;
-        font-size: 1rem;
-      }
-
-      .mp-share-btn {
-        background: ${THEME.bg.tertiary};
-        color: ${THEME.text.secondary};
-      }
-
-      .mp-share-btn:hover {
-        background: ${THEME.accent.primary};
-        color: ${THEME.bg.primary};
-      }
-
-      .mp-leave-btn {
-        background: transparent;
-        color: ${THEME.text.muted};
-      }
-
-      .mp-leave-btn:hover {
-        background: rgba(255, 68, 68, 0.15);
-        color: #ff4444;
-      }
-
-      .header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 1rem;
-        padding-bottom: 1rem;
-        border-bottom: 1px solid ${THEME.bg.tertiary};
-      }
-
-      .title {
-        font-size: 1.5rem;
-        font-weight: 700;
-        background: linear-gradient(135deg, ${THEME.accent.primary}, ${THEME.accent.secondary});
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-        margin: 0;
-      }
-
-      .download-packs-link {
-        color: ${THEME.text.secondary};
-        text-decoration: none;
-        font-size: 0.875rem;
-        padding: 0.5rem 1rem;
-        border: 1px solid ${THEME.bg.tertiary};
-        border-radius: 6px;
-        transition: all 0.2s ease;
-      }
-
-      .download-packs-link:hover {
-        color: ${THEME.accent.primary};
-        border-color: ${THEME.accent.primary};
-        background: rgba(0, 212, 255, 0.1);
-      }
-
-      .header-actions {
-        display: flex;
-        gap: 0.75rem;
-        align-items: center;
-      }
-
-      .multiplayer-btn {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        padding: 0.5rem 1rem;
-        background: linear-gradient(135deg, ${THEME.accent.secondary}, #ff4488);
-        border: none;
-        border-radius: 6px;
-        color: white;
-        font-size: 0.875rem;
-        font-weight: 600;
-        cursor: pointer;
-        transition: all 0.2s ease;
-      }
-
-      .multiplayer-btn:hover:not(:disabled) {
-        transform: translateY(-1px);
-        box-shadow: 0 4px 15px rgba(255, 0, 170, 0.4);
-      }
-
-      .multiplayer-btn:disabled {
-        opacity: 0.4;
-        cursor: not-allowed;
-        background: ${THEME.bg.tertiary};
-      }
-
-      .mp-icon {
-        font-size: 1rem;
-      }
-
-      .difficulty-filter {
-        display: flex;
-        gap: 0.25rem;
-      }
-
-      .filter-option {
-        padding: 0.35rem 0.6rem;
-        background: ${THEME.bg.secondary};
-        border-radius: 4px;
-        font-size: 0.75rem;
-        font-weight: 600;
-        color: ${THEME.text.secondary};
-        cursor: pointer;
-        transition: all 0.15s ease;
-      }
-
-      .filter-option:hover { background: ${THEME.bg.tertiary}; }
-      .filter-option.selected {
-        background: rgba(255, 0, 170, 0.2);
-        color: ${THEME.accent.secondary};
-      }
-
-      .columns {
-        display: flex;
-        gap: 1rem;
-        flex: 1;
-        min-height: 0;
-      }
-
-      .column {
-        background: ${THEME.bg.secondary};
-        border-radius: 8px;
-        display: flex;
-        flex-direction: column;
-        overflow: hidden;
-      }
-
-      /* Remove background on wheel columns */
-      .packs-column,
-      .songs-column,
-      .difficulties-column {
-        background: transparent;
-      }
-
-      .packs-column { flex: 0 0 220px; }
-      .songs-column { flex: 0 0 280px; }
-      .difficulties-column { flex: 0 0 200px; }
-      .stats-column { flex: 1; }
-
-      .column-header {
-        padding: 0.75rem 1rem;
-        font-size: 0.7rem;
-        font-weight: 700;
-        color: ${THEME.text.muted};
-        letter-spacing: 1px;
-        border-bottom: 1px solid ${THEME.bg.tertiary};
-      }
-
-      .column-list {
-        flex: 1;
-        overflow: hidden;
-        padding: 0.5rem;
-        position: relative;
-      }
-
-      /* 3D Wheel Effect - Subtle curve on a huge wheel */
-      .wheel-viewport {
-        position: absolute;
-        inset: 0;
-        perspective: 1200px;
-        perspective-origin: center center;
-        overflow: hidden;
-      }
-
-      /* Curved wheel border - both arcs curve same direction "( item (" */
-      .wheel-border {
-        position: absolute;
-        inset: 0;
-        pointer-events: none;
-        z-index: 25;
-        overflow: visible;
-        /* Fade out at top and bottom */
-        mask-image: linear-gradient(
-          to bottom,
-          transparent 0%,
-          black 15%,
-          black 85%,
-          transparent 100%
-        );
-        -webkit-mask-image: linear-gradient(
-          to bottom,
-          transparent 0%,
-          black 15%,
-          black 85%,
-          transparent 100%
-        );
-      }
-
-      .wheel-border::before,
-      .wheel-border::after {
-        content: '';
-        position: absolute;
-        top: 50%;
-        width: 8000px;
-        height: 8000px;
-        border: 2px solid transparent;
-        border-radius: 50%;
-        transform: translateY(-50%);
-        transition: border-color 0.2s ease, filter 0.2s ease;
-      }
-
-      /* Left arc "(" */
-      .wheel-border::before {
-        left: 2px;
-        border-left-color: rgba(100, 100, 120, 0.4);
-      }
-
-      /* Right arc "(" - positioned so left edge is visible inside container */
-      .wheel-border::after {
-        left: calc(100% - 25px);
-        border-left-color: rgba(100, 100, 120, 0.4);
-      }
-
-      .column.active .wheel-border::before,
-      .column.active .wheel-border::after {
-        border-left-color: ${THEME.accent.primary};
-        animation: arc-glow var(--glow-speed, 2s) ease-in-out infinite;
-        animation-delay: var(--arc-animation-delay, 0ms);
-      }
-
-      @keyframes arc-glow {
-        0%, 100% {
-          border-left-color: rgba(0, 212, 255, 0.7);
-          filter: drop-shadow(0 0 3px rgba(0, 212, 255, 0.9));
-        }
-        50% {
-          border-left-color: rgba(0, 255, 255, 1);
-          filter: drop-shadow(0 0 6px rgba(0, 255, 255, 1)) drop-shadow(0 0 10px rgba(0, 212, 255, 0.8));
-        }
-      }
-
-      .wheel-container {
-        position: absolute;
-        left: 0;
-        right: 0;
-        display: flex;
-        flex-direction: column;
-        padding: 0 2.25rem 0 0.75rem;
-        transform-style: preserve-3d;
-        transition: transform 0.25s cubic-bezier(0.23, 1, 0.32, 1);
-      }
-
-      .wheel-item {
-        flex-shrink: 0;
-        transform-style: preserve-3d;
-        transform-origin: center center;
-        transition: transform 0.25s cubic-bezier(0.23, 1, 0.32, 1), opacity 0.2s ease;
-      }
-
-      .wheel-item.selected {
-        opacity: 1 !important;
-      }
-
-      /* Wheel edge fade overlay */
-      .wheel-viewport::before,
-      .wheel-viewport::after {
-        content: '';
-        position: absolute;
-        left: 0;
-        right: 0;
-        height: 20%;
-        pointer-events: none;
-        z-index: 10;
-      }
-
-      .wheel-viewport::before {
-        top: 0;
-        background: linear-gradient(
-          to bottom,
-          ${THEME.bg.primary} 0%,
-          transparent 100%
-        );
-      }
-
-      .wheel-viewport::after {
-        bottom: 0;
-        background: linear-gradient(
-          to top,
-          ${THEME.bg.primary} 0%,
-          transparent 100%
-        );
-      }
-
-      .empty {
-        color: ${THEME.text.muted};
-        text-align: center;
-        padding: 2rem;
-        font-size: 0.85rem;
-      }
-
-      .list-item {
-        padding: 0.6rem 0.75rem;
-        border-radius: 6px;
-        cursor: pointer;
-        transition: all 0.1s ease;
-        margin-bottom: 0.25rem;
-        position: relative;
-      }
-
-      /* Curved separator line using pseudo-element that follows 3D transform */
-      .list-item::after,
-      .wheel-ghost::after {
-        content: '';
-        position: absolute;
-        left: 5%;
-        right: 5%;
-        bottom: -2px;
-        height: 1px;
-        background: linear-gradient(90deg,
-          transparent 0%,
-          rgba(255, 255, 255, 0.15) 15%,
-          rgba(255, 255, 255, 0.25) 50%,
-          rgba(255, 255, 255, 0.15) 85%,
-          transparent 100%
-        );
-        border-radius: 50%;
-        transform: scaleY(0.5);
-      }
-
-      /* Ghost items to simulate wheel continuity */
-      .wheel-ghost {
-        height: 52px;
-        min-height: 52px;
-        padding: 0.6rem 0.75rem;
-        margin-bottom: 0.25rem;
-        flex-shrink: 0;
-        box-sizing: border-box;
-        border-radius: 6px;
-        position: relative;
-      }
-
-      .list-item:hover { background: ${THEME.bg.tertiary}; }
-      .list-item.selected {
-        background: transparent;
-        position: relative;
-      }
-
-      .list-item.selected::before,
-      .list-item.selected::after {
-        content: '';
-        position: absolute;
-        left: 0;
-        right: 0;
-        height: 2px;
-        background: linear-gradient(
-          90deg,
-          transparent 0%,
-          #d4af37 20%,
-          #ffd700 50%,
-          #d4af37 80%,
-          transparent 100%
-        );
-        box-shadow: 0 0 8px rgba(255, 215, 0, 0.5);
-      }
-
-      .list-item.selected::before {
-        top: -2px;
-      }
-
-      .list-item.selected::after {
-        bottom: -2px;
-      }
-
-      .list-item.selected .item-name,
-      .list-item.selected .diff-name {
-        font-size: 1rem;
-        font-weight: 600;
-      }
-
-      .list-item.selected .item-name {
-        color: #fff;
-      }
-
-      .packs-column .list-item {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-      }
-      .list-item .item-icon { flex-shrink: 0; }
-      .list-item .item-name {
-        flex: 1;
-        font-size: 0.85rem;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-      .list-item .item-count {
-        flex-shrink: 0;
-        font-size: 0.7rem;
-        color: ${THEME.text.muted};
-        background: ${THEME.bg.tertiary};
-        padding: 0.15rem 0.4rem;
-        border-radius: 4px;
-      }
-
-      .song-row {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-      }
-
-      .song-meta {
-        display: flex;
-        gap: 0.75rem;
-        margin-top: 0.25rem;
-        font-size: 0.7rem;
-        color: ${THEME.text.muted};
-      }
-
-      .best-grade {
-        font-size: 0.65rem;
-        font-weight: 700;
-        padding: 0.1rem 0.3rem;
-        border-radius: 3px;
-      }
-
-      .grade-aaaa { background: rgba(0, 255, 255, 0.25); color: #00ffff; text-shadow: 0 0 8px currentColor; }
-      .grade-aaa { background: rgba(0, 220, 220, 0.2); color: #00dddd; }
-      .grade-aa { background: rgba(255, 255, 0, 0.2); color: #ffff00; }
-      .grade-a { background: rgba(0, 255, 136, 0.2); color: #00ff88; }
-      .grade-b { background: rgba(0, 212, 255, 0.2); color: #00d4ff; }
-      .grade-c { background: rgba(255, 170, 0, 0.2); color: #ffaa00; }
-      .grade-d, .grade-f { background: rgba(255, 68, 68, 0.2); color: #ff4444; }
-
-      /* Stats Column */
-      .song-details { padding: 1rem; }
-      .song-title { font-size: 1.25rem; margin: 0 0 0.25rem 0; }
-      .song-artist { color: ${THEME.text.secondary}; font-size: 0.9rem; }
-      .song-bpm {
-        color: ${THEME.accent.primary};
-        font-size: 0.8rem;
-        display: flex;
-        align-items: center;
-      }
-
-      .difficulty-tabs {
-        display: flex;
-        gap: 0.5rem;
-        margin-top: 1rem;
-        flex-wrap: wrap;
-      }
-
-      .diff-tab {
-        padding: 0.5rem 0.75rem;
-        background: ${THEME.bg.tertiary};
-        border-radius: 6px;
-        cursor: pointer;
-        text-align: center;
-        border: 2px solid transparent;
-        transition: all 0.15s ease;
-      }
-
-      .diff-tab:hover { background: ${THEME.bg.primary}; }
-      .diff-tab.selected { border-color: ${THEME.accent.primary}; }
-
-      .diff-name { font-size: 0.75rem; display: block; }
-      .diff-level { font-size: 0.65rem; color: ${THEME.text.muted}; display: block; }
-      .diff-grade { font-size: 0.6rem; margin-top: 0.25rem; display: block; color: ${THEME.accent.success}; }
-
-      .diff-tab[data-diff="Beginner"] .diff-name,
-      .diff-tab[data-diff="Easy"] .diff-name { color: #88ff88; }
-      .diff-tab[data-diff="Medium"] .diff-name { color: #ffff44; }
-      .diff-tab[data-diff="Hard"] .diff-name { color: #ff8844; }
-      .diff-tab[data-diff="Challenge"] .diff-name { color: #ff4488; }
-
-      /* Difficulty column items */
-      .diff-item { display: flex; flex-direction: column; gap: 0.25rem; }
-      .diff-row { display: flex; align-items: center; justify-content: space-between; }
-      .diff-name[data-diff="Beginner"],
-      .diff-name[data-diff="Easy"] { color: #88ff88; }
-      .diff-name[data-diff="Medium"] { color: #ffff44; }
-      .diff-name[data-diff="Hard"] { color: #ff8844; }
-      .diff-name[data-diff="Challenge"] { color: #ff4488; }
-      .diff-level { font-size: 0.7rem; color: ${THEME.text.muted}; }
-      .diff-score { display: flex; align-items: center; gap: 0.5rem; font-size: 0.75rem; }
-      .diff-grade { font-weight: 700; font-size: 0.7rem; padding: 0.1rem 0.3rem; border-radius: 3px; }
-      .diff-score-value { color: ${THEME.text.secondary}; font-family: 'SF Mono', Monaco, monospace; font-size: 0.7rem; }
-      .diff-no-score { font-size: 0.7rem; color: ${THEME.text.muted}; font-style: italic; }
-
-      /* Play button */
-      .play-button {
-        display: flex;
-        align-items: center;
-        gap: 0.75rem;
-        padding: 0.75rem 1.5rem;
-        margin-left: auto;
-        background: linear-gradient(135deg, #d4af37, #ffd700, #d4af37);
-        background-size: 200% 200%;
-        border: none;
-        border-radius: 8px;
-        color: #1a1a2e;
-        font-size: 1rem;
-        font-weight: 700;
-        letter-spacing: 1px;
-        cursor: pointer;
-        animation: play-button-glow var(--glow-speed, 2s) ease-in-out infinite var(--arc-animation-delay, 0ms), play-button-shimmer 3s ease-in-out infinite var(--shimmer-animation-delay, 0ms);
-        transition: transform 0.15s ease;
-      }
-
-      .play-button:hover {
-        transform: scale(1.05);
-      }
-
-      .play-icon {
-        font-size: 1.2rem;
-      }
-
-      @keyframes play-button-glow {
-        0%, 100% {
-          box-shadow: 0 0 10px rgba(255, 215, 0, 0.5), 0 0 20px rgba(255, 215, 0, 0.3), 0 0 30px rgba(255, 215, 0, 0.2);
-        }
-        50% {
-          box-shadow: 0 0 15px rgba(255, 215, 0, 0.8), 0 0 30px rgba(255, 215, 0, 0.5), 0 0 45px rgba(255, 215, 0, 0.3);
-        }
-      }
-
-      @keyframes play-button-shimmer {
-        0% { background-position: 0% 50%; }
-        50% { background-position: 100% 50%; }
-        100% { background-position: 0% 50%; }
-      }
-
-      /* Chart details in stats column */
-      .chart-details { padding: 1rem; }
-      .chart-header { margin-bottom: 1rem; }
-      .title-row {
-        display: flex;
-        align-items: baseline;
-        gap: 0.75rem;
-      }
-      .song-duration {
-        font-size: 0.9rem;
-        color: ${THEME.text.muted};
-        font-family: 'SF Mono', Monaco, monospace;
-      }
-      .chart-info-row { display: flex; gap: 1rem; align-items: center; margin-top: 0.5rem; }
-      .diff-badge {
-        padding: 0.25rem 0.5rem;
-        border-radius: 4px;
-        font-size: 0.75rem;
-        font-weight: 600;
-      }
-      .diff-badge[data-diff="Beginner"],
-      .diff-badge[data-diff="Easy"] { background: rgba(136, 255, 136, 0.15); color: #88ff88; }
-      .diff-badge[data-diff="Medium"] { background: rgba(255, 255, 68, 0.15); color: #ffff44; }
-      .diff-badge[data-diff="Hard"] { background: rgba(255, 136, 68, 0.15); color: #ff8844; }
-      .diff-badge[data-diff="Challenge"] { background: rgba(255, 68, 136, 0.15); color: #ff4488; }
-
-      .section-title {
-        font-size: 0.65rem;
-        color: ${THEME.text.muted};
-        letter-spacing: 1px;
-        margin: 1.25rem 0 0.5rem 0;
-      }
-
-      .best-score-section { margin-top: 1rem; }
-      .best-score-row { display: flex; align-items: center; gap: 1rem; }
-      .best-grade-large {
-        font-size: 1.5rem;
-        font-weight: 700;
-        padding: 0.5rem 0.75rem;
-        border-radius: 6px;
-      }
-      .best-details { flex: 1; }
-      .best-score-value { font-size: 1.1rem; font-weight: 600; }
-      .best-meta { font-size: 0.75rem; color: ${THEME.text.secondary}; margin-top: 0.25rem; display: flex; gap: 1rem; }
-
-      .no-score {
-        margin-top: 1rem;
-        padding: 1rem;
-        background: ${THEME.bg.tertiary};
-        border-radius: 6px;
-        text-align: center;
-        color: ${THEME.text.muted};
-        font-size: 0.85rem;
-      }
-
-      .stats-section { margin-top: 1rem; }
-      .stats-grid {
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 0.75rem;
-      }
-
-      /* Groove Radar */
-      .radar-section { margin-top: 1.25rem; }
-      .radar-container {
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        padding: 0.5rem;
-      }
-      .radar-canvas {
-        max-width: 100%;
-      }
-
-      .stat-item {
-        text-align: center;
-        padding: 0.25rem;
-      }
-
-      .stat-value {
-        font-size: 1.5rem;
-        font-weight: 700;
-        display: block;
-        color: ${THEME.text.primary};
-        font-family: monospace;
-      }
-      .stat-label {
-        font-size: 0.75rem;
-        color: ${THEME.text.secondary};
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-      }
-
-      .footer {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-top: 1rem;
-        padding-top: 1rem;
-        border-top: 1px solid ${THEME.bg.tertiary};
-      }
-
-      .settings-row {
-        display: flex;
-        gap: 2rem;
-        align-items: center;
-      }
-
-      .cmod-selector, .offset-selector, .skin-selector {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-      }
-
-      .cmod-selector .label, .offset-selector .label, .skin-selector .label {
-        font-size: 0.75rem;
-        color: ${THEME.text.secondary};
-      }
-
-      .offset-value {
-        padding: 0.3rem 0.6rem;
-        background: rgba(0, 212, 255, 0.15);
-        border-radius: 4px;
-        font-size: 0.8rem;
-        font-weight: 600;
-        color: ${THEME.accent.primary};
-        font-family: 'SF Mono', Monaco, monospace;
-        min-width: 60px;
-        text-align: center;
-      }
-
-      .offset-btn {
-        width: 28px;
-        height: 28px;
-        border: none;
-        background: ${THEME.bg.tertiary};
-        color: ${THEME.text.primary};
-        border-radius: 4px;
-        font-size: 1rem;
-        font-weight: 700;
-        cursor: pointer;
-        transition: all 0.15s ease;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
-
-      .offset-btn:hover {
-        background: ${THEME.accent.primary};
-        color: ${THEME.bg.primary};
-      }
-
-      .offset-btn:active {
-        transform: scale(0.95);
-      }
-
-      .skin-value {
-        padding: 0.3rem 0.6rem;
-        background: rgba(255, 0, 170, 0.15);
-        border-radius: 4px;
-        font-size: 0.8rem;
-        font-weight: 600;
-        color: ${THEME.accent.secondary};
-        min-width: 80px;
-        text-align: center;
-      }
-
-      .skin-btn {
-        width: 28px;
-        height: 28px;
-        border: none;
-        background: ${THEME.bg.tertiary};
-        color: ${THEME.text.primary};
-        border-radius: 4px;
-        font-size: 0.8rem;
-        font-weight: 700;
-        cursor: pointer;
-        transition: all 0.15s ease;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
-
-      .skin-btn:hover {
-        background: ${THEME.accent.secondary};
-        color: ${THEME.bg.primary};
-      }
-
-      .skin-btn:active {
-        transform: scale(0.95);
-      }
-
-      .cmod-btn {
-        width: 28px;
-        height: 28px;
-        border: none;
-        border-radius: 4px;
-        background: ${THEME.bg.secondary};
-        color: ${THEME.text.secondary};
-        font-size: 1rem;
-        font-weight: 600;
-        cursor: pointer;
-        transition: all 0.15s ease;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
-
-      .cmod-btn:hover {
-        background: ${THEME.accent.primary};
-        color: ${THEME.bg.primary};
-      }
-
-      .cmod-btn:active {
-        transform: scale(0.95);
-      }
-
-      .cmod-value {
-        min-width: 50px;
-        padding: 0 0.5rem;
-        text-align: center;
-        font-family: monospace;
-        font-size: 0.85rem;
-        font-weight: 600;
-        color: ${THEME.accent.primary};
-      }
-
-      .nav-hint {
-        display: flex;
-        gap: 1.5rem;
-        font-size: 0.75rem;
-        color: ${THEME.text.muted};
-      }
-
-      .demo-hint { color: ${THEME.accent.secondary}; font-weight: 600; }
-      .glow-hint { color: ${THEME.accent.primary}; font-weight: 600; }
-
-      /* Multiplayer Modal */
-      .mp-modal-overlay {
-        position: fixed;
-        inset: 0;
-        background: rgba(0, 0, 0, 0.85);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        z-index: 1000;
-        animation: fadeIn 0.2s ease;
-      }
-
-      @keyframes fadeIn {
-        from { opacity: 0; }
-        to { opacity: 1; }
-      }
-
-      .mp-modal {
-        background: ${THEME.bg.secondary};
-        border-radius: 16px;
-        padding: 2rem;
-        min-width: 400px;
-        max-width: 90vw;
-        position: relative;
-        border: 1px solid ${THEME.bg.tertiary};
-        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
-        animation: slideUp 0.3s ease;
-      }
-
-      @keyframes slideUp {
-        from { transform: translateY(20px); opacity: 0; }
-        to { transform: translateY(0); opacity: 1; }
-      }
-
-      .mp-modal h2 {
-        margin: 0 0 1.5rem 0;
-        font-size: 1.5rem;
-        background: linear-gradient(135deg, ${THEME.accent.primary}, ${THEME.accent.secondary});
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-        text-align: center;
-      }
-
-      .mp-section {
-        margin-bottom: 1rem;
-      }
-
-      .mp-section h3 {
-        font-size: 0.9rem;
-        color: ${THEME.text.secondary};
-        margin: 0 0 0.75rem 0;
-        font-weight: 500;
-      }
-
-      .mp-input-row {
-        display: flex;
-        gap: 0.5rem;
-      }
-
-      .mp-input-row input {
-        flex: 1;
-        padding: 0.75rem 1rem;
-        background: ${THEME.bg.tertiary};
-        border: 1px solid transparent;
-        border-radius: 8px;
-        color: ${THEME.text.primary};
-        font-size: 1rem;
-        outline: none;
-        transition: border-color 0.2s;
-      }
-
-      .mp-input-row input:focus {
-        border-color: ${THEME.accent.primary};
-      }
-
-      .mp-input-row input::placeholder {
-        color: ${THEME.text.muted};
-      }
-
-      .mp-btn {
-        padding: 0.75rem 1.25rem;
-        border: none;
-        border-radius: 8px;
-        font-size: 0.9rem;
-        font-weight: 600;
-        cursor: pointer;
-        transition: all 0.2s;
-        white-space: nowrap;
-      }
-
-      .mp-btn-primary {
-        background: linear-gradient(135deg, ${THEME.accent.primary}, ${THEME.accent.secondary});
-        color: white;
-      }
-
-      .mp-btn-primary:hover {
-        transform: translateY(-1px);
-        box-shadow: 0 4px 15px rgba(0, 212, 255, 0.3);
-      }
-
-      .mp-btn-secondary {
-        background: ${THEME.bg.tertiary};
-        color: ${THEME.text.primary};
-      }
-
-      .mp-btn-secondary:hover {
-        background: rgba(255, 255, 255, 0.1);
-      }
-
-      .mp-divider {
-        display: flex;
-        align-items: center;
-        gap: 1rem;
-        color: ${THEME.text.muted};
-        margin: 1.25rem 0;
-        font-size: 0.8rem;
-      }
-
-      .mp-divider::before,
-      .mp-divider::after {
-        content: '';
-        flex: 1;
-        height: 1px;
-        background: ${THEME.bg.tertiary};
-      }
-
-      .mp-error {
-        background: rgba(255, 68, 68, 0.15);
-        color: #ff6666;
-        padding: 0.75rem 1rem;
-        border-radius: 8px;
-        font-size: 0.85rem;
-        margin-top: 1rem;
-        text-align: center;
-      }
-
-      .mp-error.hidden {
-        display: none;
-      }
-
-      .mp-close {
-        position: absolute;
-        top: 1rem;
-        right: 1rem;
-        width: 32px;
-        height: 32px;
-        border: none;
-        background: transparent;
-        color: ${THEME.text.muted};
-        font-size: 1.25rem;
-        cursor: pointer;
-        border-radius: 50%;
-        transition: all 0.2s;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
-
-      .mp-close:hover {
-        background: ${THEME.bg.tertiary};
-        color: ${THEME.text.primary};
-      }
-    </style>`;
+  private queuePreview(): void {
+    clearTimeout(this.previewTimer);
+    const cur = this.current;
+    if (!cur) return;
+    this.previewTimer = window.setTimeout(() => {
+      if (!this.visible) return;
+      if (cur.entry.silent) {
+        audio.stopPreview();
+        return;
+      }
+      void audio.playPreview(`${songDir(cur.entry)}/${cur.entry.musicFile}`, cur.entry.previewStart, cur.entry.previewLength);
+    }, PREVIEW_DELAY_MS);
   }
 }
-
-// Note: escapeHtml is now imported from ./song-select/helpers

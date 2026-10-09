@@ -1,300 +1,301 @@
-import type { Song, Chart, GameScreen, ResultsData, Settings, Difficulty } from './types';
-import { DEFAULT_SETTINGS } from './types';
-import { audioManager } from './audio';
+import './styles/base.css';
+import './styles/hud.css';
+import './styles/select.css';
+import './styles/results.css';
+import type { Difficulty, GameScreen, ResultsData, Settings } from './types';
+import { audio } from './audio';
 import { GameController } from './core/game';
-import { loadAllSongs } from './core/loader';
-import { SongSelectScreen, saveScore } from './ui/song-select';
+import { loadManifest, loadSong } from './core/loader';
+import type { SongEntry } from './core/manifest';
+import { buildTimingData, type TimingData } from './core/timing-data';
+import { Stage } from './render/stage';
+import { Hud } from './render/hud';
+import { applyThemeVars } from './render/theme';
+import { SongSelectScreen } from './ui/song-select';
 import { ResultsScreen } from './ui/results';
-import { multiplayerClient, multiplayerGameManager } from './multiplayer';
-import type { MultiplayerEvent } from './multiplayer';
+import { CalibrationScreen } from './ui/calibration';
+import { toast } from './ui/dom';
+import { loadSettings, saveSettings, submitScore, getBest, saveLastRunErrors } from './ui/storage';
+import { multiplayerClient, multiplayerGameManager, type MultiplayerEvent } from './multiplayer';
 
 // ============================================================================
-// Main Application
+// App shell: one WebGL stage behind everything, DOM screens on top.
+// title → song select ⇄ gameplay → results, plus calibration.
 // ============================================================================
 
 class App {
-  private canvas: HTMLCanvasElement;
-  private uiContainer: HTMLElement;
-  private loadingElement: HTMLElement;
+  private readonly ui: HTMLElement;
+  private readonly stage: Stage;
+  private readonly hud: Hud;
+  private readonly select: SongSelectScreen;
+  private readonly results: ResultsScreen;
+  private readonly calibration: CalibrationScreen;
+  private game: GameController | null = null;
 
-  private gameController: GameController | null = null;
-  private songSelectScreen: SongSelectScreen | null = null;
-  private resultsScreen: ResultsScreen | null = null;
+  private screen: GameScreen | 'title' = 'loading';
+  private settings: Settings = loadSettings();
+  private songs: SongEntry[] = [];
+  private last: { entry: SongEntry; difficulty: Difficulty; autoplay: boolean; practice?: { from: number; to: number } } | null = null;
+  private multiplayer = false;
+  private escArmedUntil = 0;
 
-  private currentScreen: GameScreen = 'loading';
-  private songs: Song[] = [];
-  private lastPlayedSong: Song | null = null;
-  private lastPlayedChart: Chart | null = null;
-  private currentSettings: Settings = { ...DEFAULT_SETTINGS };
-
-  /** Multiplayer mode active */
-  private isMultiplayerMode: boolean = false;
+  // Menu backdrop clock
+  private menuLast = performance.now();
+  private previewTiming: { songId: string; timing: TimingData } | null = null;
 
   constructor() {
-    this.canvas = document.getElementById('game-canvas') as HTMLCanvasElement;
-    this.loadingElement = document.getElementById('loading') as HTMLElement;
-
-    // Create UI container
-    this.uiContainer = document.createElement('div');
-    this.uiContainer.id = 'ui-container';
-    document.getElementById('app')!.appendChild(this.uiContainer);
-
-    // Initialize screens
-    this.songSelectScreen = new SongSelectScreen(this.uiContainer, {
-      onSongSelect: (song, chart, settings) => this.startGame(song, chart, settings),
-      onDemo: (song, chart, settings) => this.startGame(song, chart, settings, true),
+    applyThemeVars();
+    const canvas = document.getElementById('stage') as HTMLCanvasElement;
+    this.ui = document.getElementById('ui') as HTMLElement;
+    this.stage = new Stage(canvas);
+    this.hud = new Hud(this.ui);
+    this.select = new SongSelectScreen(this.ui, this.settings, {
+      onPlay: (entry, difficulty, autoplay, practice) => void this.play(entry, difficulty, autoplay, false, practice),
+      onCalibrate: () => this.showCalibration(),
+      onSettings: (s) => this.updateSettings(s),
+    });
+    this.results = new ResultsScreen(this.ui, {
+      onContinue: () => this.showSelect(),
+      onRetry: () => this.last && void this.play(this.last.entry, this.last.difficulty, this.last.autoplay, false, this.last.practice),
+      onApplyOffset: (d) => this.updateSettings({ ...this.settings, offsetMs: this.settings.offsetMs + d }),
+    });
+    this.calibration = new CalibrationScreen(this.ui, {
+      onDone: (offset) => {
+        if (offset !== null) this.updateSettings({ ...this.settings, offsetMs: offset });
+        this.showSelect();
+      },
     });
 
-    this.resultsScreen = new ResultsScreen(this.uiContainer, {
-      onContinue: () => this.handleResultsContinue(),
-      onRetry: () => this.retryLastSong(),
-    });
-
-    // Global keyboard handlers for pause/exit
-    window.addEventListener('keydown', this.handleGlobalKeyDown.bind(this));
-    window.addEventListener('keyup', this.handleGlobalKeyUp.bind(this));
-
-    // Listen for multiplayer events
-    multiplayerClient.addEventListener(this.handleMultiplayerEvent.bind(this));
+    window.addEventListener('resize', () => this.stage.resize());
+    window.addEventListener('keydown', this.onKey);
+    multiplayerClient.addEventListener(this.onMultiplayer);
   }
 
-  /**
-   * Initialize the application
-   */
   async init(): Promise<void> {
+    const loading = document.getElementById('loading')!;
     try {
-      // Initialize audio in background (will activate on first user interaction)
-      audioManager.init().catch(() => {
-        // Audio init may fail until user interacts - that's fine
+      this.songs = await loadManifest();
+    } catch (e) {
+      console.error(e);
+    }
+    loading.classList.add('hidden');
+    this.showTitle();
+    this.menuLoop();
+  }
+
+  // --------------------------------------------------------------------------
+  // Screens
+  // --------------------------------------------------------------------------
+
+  private showTitle(): void {
+    this.screen = 'title';
+    const title = document.createElement('div');
+    title.className = 'title-screen';
+    title.innerHTML = `
+      <div class="title-logo"><span class="title-step">STEPMANIA</span><span class="title-99" data-text="99">99</span></div>
+      <p class="title-tag">Rhythm battle royale</p>
+      <button class="title-start">PRESS <kbd>ENTER</kbd></button>
+      <p class="title-foot">${this.songs.length} songs · headphones recommended</p>`;
+    this.ui.appendChild(title);
+    let started = false;
+    const start = async () => {
+      if (started) return;
+      started = true;
+      window.removeEventListener('keydown', onKey);
+      await audio.unlock();
+      audio.setVolumes({ music: this.settings.musicVolume, sfx: this.settings.sfxVolume, voice: this.settings.voiceVolume });
+      await audio.loadSfx();
+      audio.play1('ui-start');
+      audio.play1('vo-welcome');
+      title.classList.add('leaving');
+      setTimeout(() => {
+        title.remove();
+        this.afterTitle();
+      }, 450);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code === 'Enter' || e.code === 'Space') {
+        e.preventDefault();
+        void start();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    title.querySelector('.title-start')!.addEventListener('click', () => void start());
+  }
+
+  /** Deep links: ?room=CODE joins a battle, ?song=<id>&diff=<Difficulty>&autoplay=1 starts a chart */
+  private afterTitle(): void {
+    const params = new URLSearchParams(window.location.search);
+    this.showSelect();
+    const room = params.get('room');
+    if (room) void this.select.joinFromUrl(room);
+    const songId = params.get('song');
+    if (songId) {
+      const entry = this.songs.find((s) => s.id === songId);
+      const meta = entry?.charts.find((c) => c.difficulty === params.get('diff')) ?? entry?.charts[entry.charts.length - 1];
+      if (entry && meta) void this.play(entry, meta.difficulty, params.get('autoplay') === '1');
+    }
+  }
+
+  private showSelect(): void {
+    this.screen = 'song-select';
+    this.multiplayer = false;
+    this.results.hide();
+    this.select.show(this.songs, this.settings);
+  }
+
+  private showCalibration(): void {
+    this.screen = 'calibration';
+    this.select.hide();
+    void this.calibration.show(this.settings.offsetMs);
+  }
+
+  private async play(entry: SongEntry, difficulty: Difficulty, autoplay: boolean, multiplayer = false, practice?: { from: number; to: number }): Promise<void> {
+    this.game?.stop();
+    this.select.hide();
+    this.results.hide();
+    this.screen = 'gameplay';
+    this.multiplayer = multiplayer;
+    this.last = practice ? { entry, difficulty, autoplay, practice } : { entry, difficulty, autoplay };
+    document.body.classList.add('in-game');
+    const game = new GameController(this.stage, this.hud, this.settings);
+    this.game = game;
+    game.onFinish = (r) => this.showResults(r);
+    try {
+      const song = await loadSong(entry);
+      const chart = song.charts.find((c) => c.difficulty === difficulty) ?? song.charts[0]!;
+      if (this.game !== game) return;
+      const best = getBest(song.id, chart.difficulty);
+      await game.start(song, chart, {
+        autoplay,
+        multiplayer,
+        ...(practice ? { practice } : {}),
+        paceCurve: best?.lossCurve ?? null,
+        paceTarget: best ? { label: 'PB', percentage: best.percentage } : { label: 'AA', percentage: 93 },
       });
-
-      // Load songs from disk
-      const loadedSongs = await loadAllSongs();
-
-      // Use only real StepMania songs
-      this.songs = loadedSongs;
-
-      // Hide loading
-      this.hideLoading();
-
-      // Check for room code in URL (?room=ABC123)
-      const urlParams = new URLSearchParams(window.location.search);
-      const roomCode = urlParams.get('room');
-
-      // Always show song select first
-      this.showSongSelect();
-
-      // If room code in URL, prompt to join
-      if (roomCode) {
-        this.songSelectScreen?.joinRoomFromUrl(roomCode);
-      }
-    } catch (error) {
-      console.error('Failed to initialize:', error);
-      this.showError('Failed to initialize. Please refresh the page.');
+    } catch (e) {
+      console.error('Failed to start', e);
+      this.game = null;
+      document.body.classList.remove('in-game');
+      this.showSelect();
     }
   }
 
-  /**
-   * Hide loading screen
-   */
-  private hideLoading(): void {
-    this.loadingElement.classList.add('hidden');
+  private showResults(r: ResultsData): void {
+    this.game = null;
+    document.body.classList.remove('in-game');
+    this.screen = 'results';
+    if (!r.autoplay) saveLastRunErrors(r.song.id, r.chart.difficulty, r.errors);
+    const record = r.autoplay || r.failed || r.rate !== 1
+      ? false
+      : submitScore(r.song.id, r.chart.difficulty, {
+          grade: r.grade,
+          score: r.score,
+          exScore: r.exScore,
+          maxCombo: r.maxCombo,
+          percentage: r.percentage,
+          fullCombo: r.isFullCombo,
+          date: Date.now(),
+          lossCurve: r.lossCurve,
+        });
+    this.results.show(r, record, this.multiplayer);
   }
 
-  /**
-   * Show error message
-   */
-  private showError(message: string): void {
-    this.loadingElement.innerHTML = `
-      <h1 style="color: #ff4444;">Error</h1>
-      <p>${message}</p>
-    `;
+  private quitGame(): void {
+    if (this.multiplayer) multiplayerGameManager.notifyDeath();
+    this.game?.stop();
+    this.game = null;
+    document.body.classList.remove('in-game');
+    audio.play1('ui-back');
+    this.showSelect();
   }
 
-  /**
-   * Show song select screen
-   */
-  private showSongSelect(): void {
-    this.currentScreen = 'song-select';
-    this.isMultiplayerMode = false;
-    this.canvas.classList.add('hidden');
-    this.uiContainer.classList.remove('hidden');
-    this.resultsScreen?.hide();
-    this.songSelectScreen?.show(this.songs);
+  private updateSettings(s: Settings): void {
+    this.settings = s;
+    saveSettings(s);
+    audio.setVolumes({ music: s.musicVolume, sfx: s.sfxVolume, voice: s.voiceVolume });
+    this.game?.setSettings(s);
+    if (this.screen === 'song-select') this.select.show(this.songs, s);
   }
 
-  /**
-   * Handle multiplayer events
-   */
-  private handleMultiplayerEvent(event: MultiplayerEvent): void {
-    switch (event.type) {
-      case 'game-started': {
-        // Game started via multiplayer - get song/difficulty from room
-        const room = multiplayerClient.getRoom();
-        if (room?.songId && room?.difficulty) {
-          this.startMultiplayerGame(room.songId, room.difficulty);
-        }
-        break;
-      }
-      case 'game-ended': {
-        if (this.isMultiplayerMode) {
-          const results = this.gameController?.getResults();
-          if (results) {
-            this.showResults(results);
-          }
-        }
-        break;
-      }
-    }
-  }
+  // --------------------------------------------------------------------------
+  // Global input (gameplay only; screens own their keys)
+  // --------------------------------------------------------------------------
 
-  /**
-   * Start a multiplayer game
-   */
-  private async startMultiplayerGame(songId: string, difficulty: Difficulty): Promise<void> {
-    const song = this.songs.find(s => s.id === songId);
-    if (!song) {
-      console.error('Song not found:', songId);
+  private onKey = (e: KeyboardEvent) => {
+    if (this.screen !== 'gameplay' || !this.game || e.repeat) return;
+    if (e.code === 'KeyV') {
+      e.preventDefault();
+      this.updateSettings({ ...this.settings, focus: !this.settings.focus });
       return;
     }
+    if (e.code === 'Escape') {
+      e.preventDefault();
+      if (this.game.isPaused) return this.quitGame();
+      if (this.game.canPause) return this.game.pause();
+      if (this.multiplayer || this.last?.autoplay) {
+        const now = performance.now();
+        if (now < this.escArmedUntil || this.last?.autoplay) return this.quitGame();
+        this.escArmedUntil = now + 1500;
+        this.hud.message('ESC AGAIN TO QUIT', 'hint', 1500);
+      }
+    } else if (e.code === 'Enter' && this.game.isPaused) {
+      e.preventDefault();
+      this.game.resume();
+    }
+  };
 
-    const chart = song.charts.find(c => c.difficulty === difficulty);
-    if (!chart) {
-      console.error('Chart not found:', difficulty);
+  private onMultiplayer = (e: MultiplayerEvent) => {
+    if (e.type === 'game-ended' && this.screen === 'gameplay' && this.multiplayer) {
+      // Battle decided; the song plays out, the placement is announced now
+      const me = multiplayerClient.getPlayerId();
+      const placement = (e.data as { playerId: string; placement: number }[] | undefined)?.find((p) => p.playerId === me)?.placement;
+      if (placement === 1) {
+        audio.play1('clear-fanfare', { gain: 0.7 });
+        this.hud.message('VICTORY', 'fc-perfect', 2600);
+      } else if (placement) {
+        this.hud.message(`#${placement}`, 'hint', 2000);
+      }
       return;
     }
-
-    this.isMultiplayerMode = true;
-    multiplayerGameManager.init();
-
-    // Start the game
-    await this.startGame(song, chart, {});
-  }
-
-  /**
-   * Start a game
-   */
-  private async startGame(
-    song: Song,
-    chart: Chart,
-    settings?: Partial<Settings>,
-    autoplay: boolean = false
-  ): Promise<void> {
-    this.currentScreen = 'gameplay';
-    this.lastPlayedSong = song;
-    this.lastPlayedChart = chart;
-
-    // Merge settings
-    if (settings) {
-      this.currentSettings = { ...this.currentSettings, ...settings };
-    }
-
-    // Hide UI, show canvas
-    this.songSelectScreen?.hide();
-    this.uiContainer.classList.add('hidden');
-    this.canvas.classList.remove('hidden');
-
-    // Create game controller with settings
-    this.gameController = new GameController(this.canvas, this.currentSettings);
-
-    // Listen for game events
-    this.gameController.addEventListener((event) => {
-      if (event.type === 'song-end' || event.type === 'song-fail') {
-        this.showResults(event.data as ResultsData);
+    if (e.type === 'game-started') {
+      const room = multiplayerClient.getRoom();
+      const entry = this.songs.find((s) => s.id === room?.songId);
+      if (!entry || !room?.difficulty) {
+        // Without the song we can't play: bow out so the room can still finish
+        console.error('Battle song not found locally', room?.songId);
+        multiplayerGameManager.notifyDeath();
+        toast(`The host picked a song you don't have (${room?.songId ?? '?'}). You sit this round out.`, 5000);
+        return;
       }
-    });
-
-    // Start the game
-    try {
-      await this.gameController.start(song, chart, autoplay);
-    } catch (error) {
-      console.error('Failed to start game:', error);
-      this.showSongSelect();
+      multiplayerGameManager.init();
+      void this.play(entry, room.difficulty, false, true);
     }
-  }
+  };
 
-  /**
-   * Show results screen
-   */
-  private showResults(results: ResultsData): void {
-    this.currentScreen = 'results';
-    this.gameController?.stop();
-    this.gameController = null;
+  // --------------------------------------------------------------------------
+  // Menu backdrop: beat-synced to the song preview
+  // --------------------------------------------------------------------------
 
-    // Save score to memory (only if not failed)
-    if (!results.failed) {
-      saveScore(results.song.id, results.chart.difficulty, {
-        grade: results.grade,
-        score: results.score,
-        maxCombo: results.maxCombo,
-        accuracy: results.percentage,
-        date: Date.now(),
-      });
+  private menuLoop = () => {
+    requestAnimationFrame(this.menuLoop);
+    if (this.screen === 'gameplay' || document.hidden) return;
+    const now = performance.now();
+    const dt = Math.min(0.1, (now - this.menuLast) / 1000);
+    this.menuLast = now;
+    audio.sync();
+    let beat = (now / 1000) * (96 / 60);
+    const cur = this.screen === 'song-select' ? this.select.current : null;
+    const previewMs = audio.previewTimeAt(now);
+    if (cur && previewMs !== null) {
+      if (this.previewTiming?.songId !== cur.entry.id) this.previewTiming = { songId: cur.entry.id, timing: buildTimingData(cur.entry.timing) };
+      beat = this.previewTiming.timing.timeToBeat(previewMs);
     }
-
-    this.canvas.classList.add('hidden');
-    this.uiContainer.classList.remove('hidden');
-    this.resultsScreen?.show(results);
-  }
-
-  /**
-   * Handle continue from results screen
-   * Returns to song select (multiplayer bar will show if still in a room)
-   */
-  private handleResultsContinue(): void {
-    this.showSongSelect();
-  }
-
-  /**
-   * Retry the last played song
-   */
-  private retryLastSong(): void {
-    if (this.lastPlayedSong && this.lastPlayedChart) {
-      this.resultsScreen?.hide();
-      this.startGame(this.lastPlayedSong, this.lastPlayedChart);
-    }
-  }
-
-  /**
-   * Handle global keydown events
-   */
-  private handleGlobalKeyDown(e: KeyboardEvent): void {
-    if (this.currentScreen === 'gameplay' && this.gameController) {
-      if (e.code === 'Escape' && !e.repeat) {
-        e.preventDefault();
-
-        // Ignore ESC during countdown
-        if (this.gameController.isInCountdown()) {
-          return;
-        }
-
-        if (this.gameController.isPaused()) {
-          // Already paused - exit to song select
-          this.gameController.stop();
-          this.gameController = null;
-          this.showSongSelect();
-        } else {
-          // Not paused - pause the game
-          this.gameController.pause();
-        }
-      } else if (e.code === 'Enter' && this.gameController.isPaused()) {
-        e.preventDefault();
-        this.gameController.resume();
-      }
-    }
-  }
-
-  /**
-   * Handle global keyup events
-   */
-  private handleGlobalKeyUp(_e: KeyboardEvent): void {
-    // Reserved for future use
-  }
+    this.stage.renderMenu({ time: now / 1000, beat, dt, energy: this.screen === 'results' ? 0.6 : 0.25 });
+  };
 }
-
-// ============================================================================
-// Bootstrap
-// ============================================================================
 
 const app = new App();
 app.init().catch(console.error);
+// Dev-only handle for automated timing/perf checks
+if (import.meta.env.DEV) Object.assign(window, { __sm99: { app, audio } });

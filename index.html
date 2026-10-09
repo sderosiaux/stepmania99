@@ -3,99 +3,17 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Stepmania99</title>
-    <style>
-      * {
-        margin: 0;
-        padding: 0;
-        box-sizing: border-box;
-      }
-
-      :root {
-        --bg-primary: #0a0a0f;
-        --bg-secondary: #12121a;
-        --bg-tertiary: #1a1a25;
-        --text-primary: #ffffff;
-        --text-secondary: #a0a0b0;
-        --accent-primary: #00d4ff;
-        --accent-secondary: #ff00aa;
-        --accent-success: #00ff88;
-        --accent-warning: #ffaa00;
-        --accent-error: #ff4444;
-      }
-
-      html, body {
-        width: 100%;
-        height: 100%;
-        overflow: hidden;
-        background: var(--bg-primary);
-        color: var(--text-primary);
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-      }
-
-      #app {
-        width: 100%;
-        height: 100%;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-      }
-
-      #game-canvas {
-        display: block;
-        image-rendering: pixelated;
-        image-rendering: crisp-edges;
-      }
-
-      .hidden {
-        display: none !important;
-      }
-
-      /* Loading screen */
-      #loading {
-        position: fixed;
-        inset: 0;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        background: var(--bg-primary);
-        z-index: 1000;
-      }
-
-      #loading h1 {
-        font-size: 3rem;
-        font-weight: 700;
-        background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-        margin-bottom: 2rem;
-      }
-
-      .loading-spinner {
-        width: 48px;
-        height: 48px;
-        border: 4px solid var(--bg-tertiary);
-        border-top-color: var(--accent-primary);
-        border-radius: 50%;
-        animation: spin 1s linear infinite;
-      }
-
-      @keyframes spin {
-        to { transform: rotate(360deg); }
-      }
-    </style>
+    <meta name="theme-color" content="#05040d" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%277%27 fill=%27%2305040d%27/%3E%3Cpath d=%27M16 5 27 16h-6v11h-10V16H5z%27 fill=%27%23ff2bd6%27/%3E%3C/svg%3E" />
+    <title>Stepmania 99</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:ital,wght@0,400;0,500;0,600;0,700;1,600;1,700&family=Orbitron:wght@600;800;900&display=swap" rel="stylesheet" />
   </head>
   <body>
-    <div id="app">
-      <div id="loading">
-        <h1>Stepmania99</h1>
-        <div class="loading-spinner"></div>
-      </div>
-      <canvas id="game-canvas"></canvas>
-    </div>
+    <canvas id="stage" aria-hidden="true"></canvas>
+    <main id="ui"></main>
+    <div id="loading"><div class="loading-logo">STEPMANIA <b>99</b></div><div class="loading-bar"><i></i></div></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

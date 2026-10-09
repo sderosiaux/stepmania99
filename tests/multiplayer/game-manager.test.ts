@@ -3,7 +3,9 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { MultiplayerGameManager } from '../../src/multiplayer/game-manager';
+import { MultiplayerGameManager, type AttackNote } from '../../src/multiplayer/game-manager';
+import { multiplayerClient } from '../../src/multiplayer/client';
+import type { MultiplayerEvent } from '../../src/multiplayer/client';
 
 // Mock the multiplayerClient
 vi.mock('../../src/multiplayer/client', () => ({
@@ -36,10 +38,6 @@ describe('MultiplayerGameManager', () => {
       expect(manager.getOpponents()).toEqual([]);
     });
 
-    it('should have zero attack notes initially', () => {
-      expect(manager.getActiveAttackNotes()).toEqual([]);
-    });
-
     it('should return correct initial stats', () => {
       const stats = manager.getStats();
       expect(stats.attacksSent).toBe(0);
@@ -51,7 +49,6 @@ describe('MultiplayerGameManager', () => {
     it('should reset state on init', () => {
       manager.init();
       expect(manager.getOpponents()).toEqual([]);
-      expect(manager.getActiveAttackNotes()).toEqual([]);
       expect(manager.getStats().attacksSent).toBe(0);
       expect(manager.getStats().attacksReceived).toBe(0);
     });
@@ -61,7 +58,6 @@ describe('MultiplayerGameManager', () => {
     it('should clear all state on destroy', () => {
       manager.destroy();
       expect(manager.getOpponents()).toEqual([]);
-      expect(manager.getActiveAttackNotes()).toEqual([]);
     });
   });
 
@@ -100,17 +96,35 @@ describe('MultiplayerGameManager', () => {
     });
   });
 
-  describe('attack notes management', () => {
-    it('should cleanup judged attack notes', () => {
-      manager.cleanupAttackNotes();
-      expect(manager.getActiveAttackNotes()).toEqual([]);
+  describe('attacks', () => {
+    const emit = (event: MultiplayerEvent) => {
+      const calls = vi.mocked(multiplayerClient.addEventListener).mock.calls;
+      calls[calls.length - 1]![0](event);
+    };
+
+    it('turns a received attack into a lane note ahead of the current song time', () => {
+      const received: AttackNote[] = [];
+      manager.setOnAttackReceived((a) => received.push(a));
+      emit({ type: 'attack-received', data: { direction: 'up', timeOffset: 1500, fromPlayerName: 'Rival' } });
+      manager.update(50, 0, 0, 10_000);
+      expect(received).toHaveLength(1);
+      expect(received[0]!.fromPlayerName).toBe('Rival');
+      expect(received[0]!.note).toMatchObject({ lane: 2, direction: 'up', type: 'tap', time: 11_500 });
+      expect(received[0]!.note.id).toBeLessThan(0);
+      manager.update(50, 0, 0, 10_100);
+      expect(received).toHaveLength(1);
     });
 
-    it('should judge attack note by id', () => {
-      // Since we can't easily add attack notes without the full flow,
-      // we just verify the method doesn't throw
-      manager.judgeAttackNote(12345);
-      expect(true).toBe(true);
+    it('sends one attack per 15 combo, after flushing the combo to the server', () => {
+      vi.mocked(multiplayerClient.sendAttack).mockClear();
+      vi.mocked(multiplayerClient.updateState).mockClear();
+      manager.update(50, 14, 0, 0);
+      expect(multiplayerClient.sendAttack).not.toHaveBeenCalled();
+      manager.update(50, 15, 0, 0);
+      expect(multiplayerClient.sendAttack).toHaveBeenCalledTimes(1);
+      const stateOrder = vi.mocked(multiplayerClient.updateState).mock.invocationCallOrder.at(-1)!;
+      expect(stateOrder).toBeLessThan(vi.mocked(multiplayerClient.sendAttack).mock.invocationCallOrder[0]!);
+      expect(vi.mocked(multiplayerClient.updateState).mock.calls.at(-1)).toEqual([50, 15, 0]);
     });
   });
 });

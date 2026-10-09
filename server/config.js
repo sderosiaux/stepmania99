@@ -36,8 +36,11 @@ export const MAX_PLAYER_NAME_LENGTH = 30;
 export const PLAYER_NAME_REGEX = /^[a-zA-Z0-9_\- ]{1,30}$/;
 export const VALID_DIFFICULTIES = ['Beginner', 'Easy', 'Medium', 'Hard', 'Challenge'];
 
-// Attack system constants
-export const ATTACK_COMBO_COST = 50;
+// Attack system constants: one arrow per ATTACK_COMBO_STEP of unbroken combo (client and server share this rule)
+export const ATTACK_COMBO_STEP = 15;
+export const MAX_SONG_ID_LENGTH = 200;
+/** Attack arrows need this much warning to be readable at any scroll speed */
+export const MIN_ATTACK_TIME_OFFSET = 800;
 export const VALID_ATTACK_DIRECTIONS = ['left', 'down', 'up', 'right'];
 export const MAX_ATTACK_TIME_OFFSET = 5000;
 

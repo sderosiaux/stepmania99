@@ -75,20 +75,14 @@ export interface AttackArrow {
   fromPlayerName: string;
 }
 
-/** Attack configuration */
+/** Attack rules shared by the client (server mirrors comboThreshold as ATTACK_COMBO_STEP) */
 export const ATTACK_CONFIG = {
-  /** Combo threshold to trigger attack */
-  comboThreshold: 10,
-  /** Number of arrows sent per attack */
-  arrowsPerAttack: 2,
-  /** Min time before attack arrow appears (ms) */
-  minTimeOffset: 500,
-  /** Max time before attack arrow appears (ms) */
-  maxTimeOffset: 2000,
-  /** Damage when attack arrow is missed */
-  missedAttackDamage: 5,
-  /** Whether hitting an attack arrow breaks combo */
-  attackBreaksCombo: false,
+  /** One arrow per this much unbroken combo */
+  comboThreshold: 15,
+  /** Min time before attack arrow reaches the receptors (ms) */
+  minTimeOffset: 800,
+  /** Max time before attack arrow reaches the receptors (ms) */
+  maxTimeOffset: 2500,
 } as const;
 
 // ============================================================================
@@ -118,7 +112,7 @@ export type ClientMessage =
   | { type: 'player-update'; health: number; combo: number; score: number }
   | { type: 'player-died' }
   | { type: 'send-attack'; attack: Omit<AttackArrow, 'id' | 'fromPlayerId' | 'fromPlayerName'> }
-  | { type: 'game-finished'; score: number; placement: number }
+  | { type: 'game-finished'; score: number }
   | { type: 'host-navigation'; navigation: HostNavigationState }
   | { type: 'ping' };
 

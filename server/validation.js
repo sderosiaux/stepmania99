@@ -6,6 +6,8 @@
 
 import {
   MAX_PLAYER_NAME_LENGTH,
+  MAX_SONG_ID_LENGTH,
+  MIN_ATTACK_TIME_OFFSET,
   PLAYER_NAME_REGEX,
   ROOM_CODE_LENGTH,
   VALID_DIFFICULTIES,
@@ -39,6 +41,19 @@ export function sanitizeString(input) {
     .replace(/[<>]/g, '')
     .trim()
     .slice(0, MAX_PLAYER_NAME_LENGTH);
+}
+
+/**
+ * Song ids are pack/folder paths ("Pack/Song <3" is legal). Clients compare them verbatim
+ * and escape them when rendering, so they are validated, never rewritten.
+ * @param {unknown} input
+ * @returns {string | null}
+ */
+export function sanitizeSongId(input) {
+  if (typeof input !== 'string') return null;
+  if (input.length === 0 || input.length > MAX_SONG_ID_LENGTH || input.trim() !== input) return null;
+  // eslint-disable-next-line no-control-regex
+  return /[\u0000-\u001f\u007f]/.test(input) ? null : input;
 }
 
 /**
@@ -104,7 +119,11 @@ export function validateNavigation(nav) {
     if (typeof nav.songId !== 'string') {
       return { valid: false, error: 'songId must be a string' };
     }
-    value.songId = sanitizeString(nav.songId);
+    const songId = sanitizeSongId(nav.songId);
+    if (songId === null) {
+      return { valid: false, error: 'Invalid songId' };
+    }
+    value.songId = songId;
   }
   if (nav.difficulty !== undefined) {
     if (!VALID_DIFFICULTIES.includes(nav.difficulty)) {
@@ -148,7 +167,7 @@ export function validateAttackData(attackData) {
     return { valid: false, error: 'Invalid attack direction' };
   }
   if (typeof attackData.timeOffset !== 'number' ||
-      attackData.timeOffset < 0 ||
+      attackData.timeOffset < MIN_ATTACK_TIME_OFFSET ||
       attackData.timeOffset > MAX_ATTACK_TIME_OFFSET) {
     return { valid: false, error: 'Invalid attack timeOffset' };
   }

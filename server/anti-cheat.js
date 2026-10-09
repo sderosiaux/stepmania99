@@ -130,9 +130,8 @@ export function correctInvalidValues(playerId, health, combo, score) {
 
   return {
     health: Math.min(health, tracking.lastHealth + MAX_HEALTH_INCREASE),
-    combo: (combo !== 0 && combo > tracking.lastCombo + MAX_COMBO_INCREASE_PER_UPDATE)
-      ? tracking.lastCombo
-      : combo,
+    // Cap the jump rather than freezing at a stale value (that would block every attack until the next break)
+    combo: Math.min(combo, tracking.lastCombo + MAX_COMBO_INCREASE_PER_UPDATE),
     score: Math.max(tracking.lastScore, Math.min(score, tracking.lastScore + MAX_SCORE_INCREASE_PER_UPDATE)),
   };
 }

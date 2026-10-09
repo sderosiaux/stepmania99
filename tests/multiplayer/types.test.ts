@@ -1,31 +1,15 @@
-/**
- * Tests for multiplayer types - Focus on meaningful validation
- * Note: We don't test basic TypeScript type assignments as the compiler handles that.
- */
-
 import { describe, it, expect } from 'vitest';
 import { ATTACK_CONFIG } from '../../src/types/multiplayer';
+import { ATTACK_COMBO_STEP, MAX_ATTACK_TIME_OFFSET, MIN_ATTACK_TIME_OFFSET } from '../../server/config.js';
 
-describe('Multiplayer Types', () => {
-  describe('ATTACK_CONFIG', () => {
-    it('should have valid time offset range (min < max)', () => {
-      expect(ATTACK_CONFIG.minTimeOffset).toBeLessThan(ATTACK_CONFIG.maxTimeOffset);
-      expect(ATTACK_CONFIG.minTimeOffset).toBeGreaterThanOrEqual(0);
-    });
+describe('client/server attack contract', () => {
+  it('uses the same combo step on both sides (otherwise every attack is rejected)', () => {
+    expect(ATTACK_CONFIG.comboThreshold).toBe(ATTACK_COMBO_STEP);
+  });
 
-    it('should have positive damage values', () => {
-      expect(ATTACK_CONFIG.missedAttackDamage).toBeGreaterThan(0);
-      expect(ATTACK_CONFIG.missedAttackDamage).toBeLessThanOrEqual(100);
-    });
-
-    it('should have reasonable combo threshold', () => {
-      expect(ATTACK_CONFIG.comboThreshold).toBeGreaterThan(0);
-      expect(ATTACK_CONFIG.comboThreshold).toBeLessThanOrEqual(100);
-    });
-
-    it('should have reasonable arrows per attack', () => {
-      expect(ATTACK_CONFIG.arrowsPerAttack).toBeGreaterThan(0);
-      expect(ATTACK_CONFIG.arrowsPerAttack).toBeLessThanOrEqual(10);
-    });
+  it('sends time offsets the server accepts', () => {
+    expect(ATTACK_CONFIG.minTimeOffset).toBeGreaterThanOrEqual(MIN_ATTACK_TIME_OFFSET);
+    expect(ATTACK_CONFIG.minTimeOffset).toBeLessThan(ATTACK_CONFIG.maxTimeOffset);
+    expect(ATTACK_CONFIG.maxTimeOffset).toBeLessThanOrEqual(MAX_ATTACK_TIME_OFFSET);
   });
 });

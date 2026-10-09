@@ -228,7 +228,7 @@ describe('MultiplayerClient', () => {
     });
 
     it('should send game finished notification', () => {
-      client.notifyGameFinished(500000, 2);
+      client.notifyGameFinished(500000);
       // Should not throw
       expect(true).toBe(true);
     });

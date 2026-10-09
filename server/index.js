@@ -18,7 +18,8 @@ import {
   HEARTBEAT_INTERVAL,
   COUNTDOWN_DURATION,
   ALLOWED_ORIGINS,
-  ATTACK_COMBO_COST,
+  ATTACK_COMBO_STEP,
+  VALID_DIFFICULTIES,
 } from './config.js';
 
 // Import validation functions
@@ -29,6 +30,7 @@ import {
   validateNavigation,
   validatePlayerState,
   validateAttackData,
+  sanitizeSongId,
 } from './validation.js';
 
 // Import rate limiting
@@ -248,6 +250,8 @@ function leaveRoom(ws) {
   });
 
   if (room.state === 'playing' && player.isAlive) {
+    // One fewer contender: the next eliminated player takes the last place that remains
+    room.eliminationOrder--;
     checkGameEnd(room);
   }
 }
@@ -297,7 +301,12 @@ function selectSong(ws, songId, difficulty) {
     return;
   }
 
-  room.songId = songId;
+  const id = sanitizeSongId(songId);
+  if (id === null || !VALID_DIFFICULTIES.includes(difficulty)) {
+    send(ws, { type: 'error', message: 'Invalid song selection' });
+    return;
+  }
+  room.songId = id;
   room.difficulty = difficulty;
 
   broadcast(room, {
@@ -350,6 +359,8 @@ function startGame(ws) {
     p.score = 0;
     p.isAlive = true;
     p.placement = undefined;
+    p.lastAttackMilestone = 0;
+    p.finished = false;
     initPlayerTracking(p.id);
   }
 
@@ -388,7 +399,7 @@ function updatePlayerState(ws, health, combo, score, seq = 0) {
   if (!room || room.state !== 'playing') return;
 
   const player = room.players.get(conn.id);
-  if (!player || !player.isAlive) return;
+  if (!player || !player.isAlive || player.finished) return;
 
   // Check sequence number for deduplication
   if (seq > 0 && !checkSequence(conn.id, seq)) {
@@ -409,6 +420,7 @@ function updatePlayerState(ws, health, combo, score, seq = 0) {
   player.health = health;
   player.combo = combo;
   player.score = score;
+  player.lastAttackMilestone = Math.min(player.lastAttackMilestone ?? 0, Math.floor(combo / ATTACK_COMBO_STEP));
 
   broadcast(room, {
     type: 'player-state',
@@ -461,14 +473,15 @@ function handleAttack(ws, attackData) {
   if (!room || room.state !== 'playing') return;
 
   const player = room.players.get(conn.id);
-  if (!player || !player.isAlive) return;
+  if (!player || !player.isAlive || player.finished) return;
 
   const validation = validateAttackData(attackData);
   if (!validation.valid) return;
 
-  if (player.combo < ATTACK_COMBO_COST) return;
-
-  player.combo -= ATTACK_COMBO_COST;
+  // One attack per combo milestone; the milestone counter rewinds when the combo breaks
+  const milestone = Math.floor(player.combo / ATTACK_COMBO_STEP);
+  if (milestone < 1 || milestone <= (player.lastAttackMilestone ?? 0)) return;
+  player.lastAttackMilestone = milestone;
 
   const attack = {
     id: generateAttackId(),
@@ -479,7 +492,7 @@ function handleAttack(ws, attackData) {
   };
 
   const aliveOpponents = Array.from(room.players.values()).filter(
-    p => p.id !== player.id && p.isAlive
+    p => p.id !== player.id && p.isAlive && !p.finished
   );
 
   if (aliveOpponents.length > 0) {
@@ -537,16 +550,14 @@ function handleGameFinished(ws, score) {
   if (!room || room.state !== 'playing') return;
 
   const player = room.players.get(conn.id);
-  if (!player) return;
+  if (!player || player.finished) return;
 
   score = validateFinalScore(conn.id, score);
   cleanupPlayerTracking(conn.id);
 
+  // Finished players keep their survivor status but stop playing: no more updates, no more attacks
   player.score = score;
-
-  if (player.isAlive) {
-    player.placement = 1;
-  }
+  player.finished = true;
 
   checkGameEnd(room);
 }
@@ -557,8 +568,10 @@ function handleGameFinished(ws, score) {
  */
 function checkGameEnd(room) {
   const alivePlayers = Array.from(room.players.values()).filter(p => p.isAlive);
+  const stillPlaying = alivePlayers.filter(p => !p.finished);
 
-  if (alivePlayers.length <= 1) {
+  // Last one standing, or every survivor reached the end of the song
+  if (alivePlayers.length <= 1 || stillPlaying.length === 0) {
     endGame(room);
   }
 }

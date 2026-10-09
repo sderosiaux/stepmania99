@@ -1,230 +1,155 @@
-import type { JudgmentGrade, LetterGrade, Judgment, ResultsData, Song, Chart } from '../types';
-import { JUDGMENT_SCORES, JUDGMENT_MAINTAINS_COMBO, JUDGMENT_HEALTH, GRADE_THRESHOLDS } from '../types';
+import type { Chart, JudgmentGrade, HoldGrade, LetterGrade } from '../types';
+import { JUDGMENT_SCORES, JUDGMENT_MAINTAINS_COMBO, LIFE_DELTA, GRADE_THRESHOLDS, EX_SCORES } from '../types';
+import type { JudgeEvent } from './judge';
 
 // ============================================================================
-// Constants
+// Score state — immutable reducer over judge events.
+//
+// Every non-mine note is one "step"; every hold/roll is additionally one
+// "freeze" judged OK/NG (DDR model). Percentage = weighted steps + OK freezes.
 // ============================================================================
 
-const MAX_SCORE = 1_000_000;
-const COMBO_MULTIPLIER_THRESHOLDS = [10, 20, 30]; // Combo thresholds for multiplier increases
-const MAX_MULTIPLIER = 4;
-const INITIAL_HEALTH = 50; // Start at 50%
-const MAX_HEALTH = 100;
-const MIN_HEALTH = 0;
-
-// ============================================================================
-// Score State
-// ============================================================================
+const INITIAL_LIFE = 50;
 
 export interface ScoreState {
-  /** Raw accumulated score points */
-  rawScore: number;
-  /** Maximum possible raw score so far */
-  maxPossibleScore: number;
-  /** Current combo */
-  combo: number;
-  /** Maximum combo achieved */
-  maxCombo: number;
-  /** Count of each judgment type */
-  judgmentCounts: Record<JudgmentGrade, number>;
-  /** Total notes judged */
-  totalJudged: number;
-  /** Total notes in chart */
-  totalNotes: number;
-  /** Current health (0-100) */
-  health: number;
-  /** Whether player has failed (health reached 0) */
-  failed: boolean;
+  readonly totalSteps: number;
+  readonly totalFreezes: number;
+  readonly counts: Readonly<Record<JudgmentGrade, number>>;
+  readonly holds: Readonly<Record<HoldGrade, number>>;
+  readonly minesHit: number;
+  readonly combo: number;
+  readonly maxCombo: number;
+  readonly life: number;
+  readonly failed: boolean;
+  readonly exScore: number;
 }
 
-/**
- * Create initial score state
- */
-export function createScoreState(totalNotes: number): ScoreState {
+export function chartTotals(chart: Pick<Chart, 'notes'>): { steps: number; freezes: number } {
+  let steps = 0;
+  let freezes = 0;
+  for (const n of chart.notes) {
+    if (n.type === 'mine') continue;
+    steps++;
+    if (n.type === 'hold' || n.type === 'roll') freezes++;
+  }
+  return { steps, freezes };
+}
+
+export function createScoreState(totalSteps: number, totalFreezes: number): ScoreState {
   return {
-    rawScore: 0,
-    maxPossibleScore: 0,
+    totalSteps,
+    totalFreezes,
+    counts: { marvelous: 0, perfect: 0, great: 0, good: 0, boo: 0, miss: 0 },
+    holds: { ok: 0, ng: 0 },
+    minesHit: 0,
     combo: 0,
     maxCombo: 0,
-    judgmentCounts: {
-      marvelous: 0,
-      perfect: 0,
-      great: 0,
-      good: 0,
-      boo: 0,
-      miss: 0,
-    },
-    totalJudged: 0,
-    totalNotes,
-    health: INITIAL_HEALTH,
+    life: INITIAL_LIFE,
     failed: false,
+    exScore: 0,
   };
 }
 
-// ============================================================================
-// Combo Calculation
-// ============================================================================
+const clampLife = (v: number) => Math.max(0, Math.min(100, v));
 
-/**
- * Get the current combo multiplier
- */
-export function getComboMultiplier(combo: number): number {
-  if (combo >= COMBO_MULTIPLIER_THRESHOLDS[2]!) return MAX_MULTIPLIER;
-  if (combo >= COMBO_MULTIPLIER_THRESHOLDS[1]!) return 3;
-  if (combo >= COMBO_MULTIPLIER_THRESHOLDS[0]!) return 2;
-  return 1;
-}
-
-// ============================================================================
-// Score Updates
-// ============================================================================
-
-/**
- * Update score state with a new judgment
- */
-export function applyJudgment(state: ScoreState, judgment: Judgment): ScoreState {
-  const { grade } = judgment;
-  const scoreValue = JUDGMENT_SCORES[grade];
-  const maintainsCombo = JUDGMENT_MAINTAINS_COMBO[grade];
-  const healthChange = JUDGMENT_HEALTH[grade];
-
-  // Calculate new combo
-  const newCombo = maintainsCombo ? state.combo + 1 : 0;
-  const newMaxCombo = Math.max(state.maxCombo, newCombo);
-
-  // Calculate score with multiplier
-  const multiplier = getComboMultiplier(state.combo);
-  const scoreGain = scoreValue * multiplier;
-
-  // Update judgment counts
-  const newCounts = { ...state.judgmentCounts };
-  newCounts[grade]++;
-
-  // Update health (clamp between 0 and 100)
-  const newHealth = Math.max(MIN_HEALTH, Math.min(MAX_HEALTH, state.health + healthChange));
-  const hasFailed = newHealth <= MIN_HEALTH;
-
-  return {
-    rawScore: state.rawScore + scoreGain,
-    maxPossibleScore: state.maxPossibleScore + 100 * MAX_MULTIPLIER,
-    combo: newCombo,
-    maxCombo: newMaxCombo,
-    judgmentCounts: newCounts,
-    totalJudged: state.totalJudged + 1,
-    totalNotes: state.totalNotes,
-    health: newHealth,
-    failed: state.failed || hasFailed,
-  };
-}
-
-// ============================================================================
-// Final Score Calculation
-// ============================================================================
-
-/**
- * Calculate normalized score (0 to MAX_SCORE)
- */
-export function calculateFinalScore(state: ScoreState): number {
-  if (state.totalNotes === 0) return 0;
-
-  // Simple percentage-based scoring
-  // Each note is worth equal points, weighted by judgment
-  const maxRaw = state.totalNotes * 100;
-  const actualRaw =
-    state.judgmentCounts.marvelous * JUDGMENT_SCORES.marvelous +
-    state.judgmentCounts.perfect * JUDGMENT_SCORES.perfect +
-    state.judgmentCounts.great * JUDGMENT_SCORES.great +
-    state.judgmentCounts.good * JUDGMENT_SCORES.good +
-    state.judgmentCounts.boo * JUDGMENT_SCORES.boo +
-    state.judgmentCounts.miss * JUDGMENT_SCORES.miss;
-
-  const percentage = actualRaw / maxRaw;
-  return Math.round(percentage * MAX_SCORE);
-}
-
-/**
- * Calculate percentage (0 to 100)
- */
-export function calculatePercentage(state: ScoreState): number {
-  if (state.totalNotes === 0) return 0;
-
-  const maxRaw = state.totalNotes * 100;
-  const actualRaw =
-    state.judgmentCounts.marvelous * JUDGMENT_SCORES.marvelous +
-    state.judgmentCounts.perfect * JUDGMENT_SCORES.perfect +
-    state.judgmentCounts.great * JUDGMENT_SCORES.great +
-    state.judgmentCounts.good * JUDGMENT_SCORES.good +
-    state.judgmentCounts.boo * JUDGMENT_SCORES.boo +
-    state.judgmentCounts.miss * JUDGMENT_SCORES.miss;
-
-  return (actualRaw / maxRaw) * 100;
-}
-
-/**
- * Determine letter grade based on judgment counts and percentage
- */
-export function calculateGrade(
-  state: ScoreState
-): LetterGrade {
-  const { judgmentCounts, totalNotes } = state;
-
-  // AAAA = all Marvelous (Full Marvelous Combo)
-  if (judgmentCounts.marvelous === totalNotes && totalNotes > 0) {
-    return 'AAAA';
-  }
-
-  // AAA = all Marvelous or Perfect (no Great, Good, Boo, Miss)
-  const hasOnlyMarvelousOrPerfect =
-    judgmentCounts.great === 0 &&
-    judgmentCounts.good === 0 &&
-    judgmentCounts.boo === 0 &&
-    judgmentCounts.miss === 0 &&
-    totalNotes > 0;
-
-  if (hasOnlyMarvelousOrPerfect) {
-    return 'AAA';
-  }
-
-  // For other grades, use percentage thresholds (skip AAAA and AAA)
-  const percentage = calculatePercentage(state);
-  for (const { grade, threshold } of GRADE_THRESHOLDS) {
-    if (grade === 'AAAA' || grade === 'AAA') continue;
-    if (percentage >= threshold) {
-      return grade;
+export function applyEvent(s: ScoreState, e: JudgeEvent, canFail = true): ScoreState {
+  let next: ScoreState;
+  switch (e.kind) {
+    case 'tap': {
+      const combo = JUDGMENT_MAINTAINS_COMBO[e.grade] ? s.combo + 1 : 0;
+      next = {
+        ...s,
+        counts: { ...s.counts, [e.grade]: s.counts[e.grade] + 1 },
+        combo,
+        maxCombo: Math.max(s.maxCombo, combo),
+        life: clampLife(s.life + LIFE_DELTA[e.grade]),
+        exScore: s.exScore + EX_SCORES[e.grade],
+      };
+      break;
     }
+    case 'hold': {
+      const combo = e.grade === 'ok' ? s.combo + 1 : 0;
+      next = {
+        ...s,
+        holds: { ...s.holds, [e.grade]: s.holds[e.grade] + 1 },
+        combo,
+        maxCombo: Math.max(s.maxCombo, combo),
+        life: clampLife(s.life + LIFE_DELTA[e.grade]),
+        exScore: s.exScore + EX_SCORES[e.grade],
+      };
+      break;
+    }
+    case 'mine':
+      next = { ...s, minesHit: s.minesHit + 1, combo: 0, life: clampLife(s.life + LIFE_DELTA.mine) };
+      break;
   }
-  return 'D';
+  return canFail && next.life <= 0 ? { ...next, failed: true } : next;
 }
 
-// ============================================================================
-// Results Generation
-// ============================================================================
+/** Earned weight so far, relative to the whole chart (monotonic during play) */
+export function calculatePercentage(s: ScoreState): number {
+  const max = (s.totalSteps + s.totalFreezes) * 100;
+  if (max === 0) return 0;
+  const earned =
+    (Object.keys(s.counts) as JudgmentGrade[]).reduce((acc, g) => acc + s.counts[g] * JUDGMENT_SCORES[g], 0) + s.holds.ok * 100;
+  return (earned / max) * 100;
+}
 
-/**
- * Generate final results data
- */
-export function generateResults(state: ScoreState, song: Song, chart: Chart): ResultsData {
-  const percentage = calculatePercentage(state);
-  const score = calculateFinalScore(state);
-  const grade = calculateGrade(state);
+/** DDR-style money score, multiples of 10 */
+export function calculateScore(s: ScoreState): number {
+  return Math.floor((calculatePercentage(s) * 10000) / 10) * 10;
+}
 
-  // Full combo = no judgments below great (no good, boo, or miss)
-  const isFullCombo =
-    state.judgmentCounts.good === 0 &&
-    state.judgmentCounts.boo === 0 &&
-    state.judgmentCounts.miss === 0 &&
-    state.totalJudged > 0;
+export function maxExScore(s: ScoreState): number {
+  return s.totalSteps * EX_SCORES.marvelous + s.totalFreezes * EX_SCORES.ok;
+}
 
-  return {
-    song,
-    chart,
-    score,
-    grade,
-    maxCombo: state.maxCombo,
-    judgmentCounts: { ...state.judgmentCounts },
-    totalNotes: state.totalNotes,
-    percentage,
-    failed: state.failed,
-    isFullCombo,
-  };
+/** Every step and freeze has been judged */
+function isComplete(s: ScoreState): boolean {
+  const judged = (Object.values(s.counts) as number[]).reduce((a, b) => a + b, 0);
+  return s.totalSteps > 0 && judged === s.totalSteps && s.holds.ok + s.holds.ng === s.totalFreezes;
+}
+
+export function isFullCombo(s: ScoreState): boolean {
+  return isComplete(s) && s.counts.good === 0 && s.counts.boo === 0 && s.counts.miss === 0 && s.holds.ng === 0 && s.minesHit === 0;
+}
+
+/** Highest full-combo tier reached, or null */
+export function fullComboTier(s: ScoreState): 'marvelous' | 'perfect' | 'great' | null {
+  if (!isFullCombo(s)) return null;
+  if (s.counts.great > 0) return 'great';
+  if (s.counts.perfect > 0) return 'perfect';
+  return 'marvelous';
+}
+
+export function calculateGrade(s: ScoreState): LetterGrade {
+  if (s.failed) return 'E';
+  const clean = isComplete(s) && s.holds.ng === 0 && s.minesHit === 0 && s.counts.great + s.counts.good + s.counts.boo + s.counts.miss === 0;
+  if (clean && s.counts.perfect === 0) return 'AAAA';
+  if (clean) return 'AAA';
+  const pct = calculatePercentage(s);
+  return GRADE_THRESHOLDS.find((g) => pct >= g.threshold)?.grade ?? 'D';
+}
+
+/** Fraction (0..1) of the chart's weight already judged */
+export function judgedFraction(s: ScoreState): number {
+  const total = s.totalSteps + s.totalFreezes;
+  if (total === 0) return 0;
+  const judged = (Object.values(s.counts) as number[]).reduce((a, b) => a + b, 0) + s.holds.ok + s.holds.ng;
+  return Math.min(1, judged / total);
+}
+
+/** Points already lost, on the 1,000,000 scale */
+export function lostPoints(s: ScoreState): number {
+  return judgedFraction(s) * 1_000_000 - (calculatePercentage(s) / 100) * 1_000_000;
+}
+
+/** Expected points lost at `fraction` judged, from a stored curve (101 samples) or a flat target percentage */
+export function referenceLoss(curve: number[] | null, targetPct: number, fraction: number): number {
+  if (!curve || curve.length < 2) return fraction * (1 - targetPct / 100) * 1_000_000;
+  const x = fraction * (curve.length - 1);
+  const i = Math.floor(x);
+  const a = curve[Math.min(i, curve.length - 1)]!;
+  const b = curve[Math.min(i + 1, curve.length - 1)]!;
+  return a + (b - a) * (x - i);
 }

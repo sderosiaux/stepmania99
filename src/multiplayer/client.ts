@@ -355,7 +355,7 @@ export class MultiplayerClient {
         case 'room-joined':
           this.room = message.room;
           this.playerId = message.playerId;
-          this.emit({ type: 'room-joined', data: { room: this.room, playerId: this.playerId } });
+          this.emit({ type: 'room-joined', data: { room: this.room, playerId: this.playerId, hostNavigation: message.hostNavigation } });
           break;
 
         case 'room-updated':
@@ -556,8 +556,8 @@ export class MultiplayerClient {
   /**
    * Notify server that game is finished
    */
-  notifyGameFinished(score: number, placement: number): void {
-    this.send({ type: 'game-finished', score, placement });
+  notifyGameFinished(score: number): void {
+    this.send({ type: 'game-finished', score });
   }
 }
 
