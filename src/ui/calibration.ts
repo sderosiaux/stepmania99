@@ -109,6 +109,7 @@ export class CalibrationScreen {
     if (e.code === 'Enter') return this.result && this.close(this.result.offset);
     if (e.code === 'KeyR') return this.restart();
     if (!KEY_TO_DIRECTION[e.code] && e.code !== 'Space') return;
+    if (this.deviations.length >= TARGET_TAPS) return; // done: Enter applies, R starts over
     const t = audio.songTimeAt(e.timeStamp);
     const beat = Math.round(t / BEAT_MS);
     if (beat < WARMUP_BEATS) return;
@@ -117,9 +118,17 @@ export class CalibrationScreen {
     this.deviations.push(dev);
     this.plotTap(dev);
     this.result = robustOffset(this.deviations.slice(-TARGET_TAPS));
-    this.updateReadout();
-    if (this.deviations.length >= TARGET_TAPS) audio.play1('ui-select');
+    if (this.deviations.length >= TARGET_TAPS) this.finish();
+    else this.updateReadout();
   };
+
+  /** Enough taps: stop the metronome once, chime once, wait for Apply or Restart */
+  private finish(): void {
+    cancelAnimationFrame(this.raf);
+    audio.stopSong();
+    audio.play1('ui-select');
+    this.updateReadout();
+  }
 
   private plotTap(dev: number): void {
     const track = this.root.querySelector('.calib-track') as HTMLElement;
@@ -144,7 +153,8 @@ export class CalibrationScreen {
     }
     const { offset, spread } = this.result;
     const quality = spread < 12 ? 'very consistent' : spread < 25 ? 'consistent' : 'noisy — try a few more';
-    readout.innerHTML = `Measured offset <b>${offset > 0 ? '+' : ''}${offset} ms</b> · spread ${spread.toFixed(0)} ms (${quality})`;
+    const done = this.deviations.length >= TARGET_TAPS;
+    readout.innerHTML = `Measured offset <b>${offset > 0 ? '+' : ''}${offset} ms</b> · spread ${spread.toFixed(0)} ms (${quality})${done ? ' · <kbd>Enter</kbd> to apply, <kbd>R</kbd> to try again' : ''}`;
     apply.disabled = n < TARGET_TAPS / 2;
   }
 
