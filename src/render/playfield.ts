@@ -271,7 +271,7 @@ export class Playfield {
   private readonly fade: THREE.InstancedBufferAttribute;
   private readonly mines: THREE.InstancedMesh;
 
-  private readonly receptors: { root: THREE.Group; ring: THREE.Mesh; ringMat: THREE.MeshBasicMaterial; fill: THREE.Mesh; fillMat: THREE.MeshBasicMaterial; press: number; flash: number }[] = [];
+  private readonly receptors: { root: THREE.Group; ring: THREE.Mesh; ringMat: THREE.MeshBasicMaterial; fill: THREE.Mesh; fillMat: THREE.MeshBasicMaterial; press: number; flash: number; flashColor: THREE.Color }[] = [];
   private readonly beams: { mesh: THREE.Mesh; mat: THREE.ShaderMaterial; level: number }[] = [];
   private readonly holdPool: HoldVisual[] = [];
   private readonly bursts: Burst[] = [];
@@ -337,7 +337,7 @@ export class Playfield {
       back.position.z = -0.02;
       root.add(back, fill, ring);
       this.group.add(root);
-      this.receptors.push({ root, ring, ringMat, fill, fillMat, press: 0, flash: 0 });
+      this.receptors.push({ root, ring, ringMat, fill, fillMat, press: 0, flash: 0, flashColor: new THREE.Color() });
     }
 
     // Notes (+ dark outline instanced behind)
@@ -495,7 +495,9 @@ export class Playfield {
     if (grade === 'miss') return;
     const color = THEME.judgment[grade];
     const strong = grade === 'marvelous' || grade === 'perfect';
-    this.receptors[lane]!.flash = 1;
+    const r = this.receptors[lane]!;
+    r.flash = 1;
+    r.flashColor.set(color);
     this.spawnBurst(lane, color, true, 0.9, strong ? 2.1 : 1.7, 0.24, strong ? 0.75 : 0.55);
     this.spray(lane, color, strong ? 22 : 10, strong ? 0.9 : 0.6);
   }
@@ -573,10 +575,17 @@ export class Playfield {
       const s = 1 - 0.12 * r.press + 0.06 * pulse;
       r.root.scale.setScalar(s);
       // HDR color: values above 1 feed the bloom on the beat and on hits
-      if (this.focus) r.flash = 0;
-      r.ringMat.color.set(THEME.lane[i]!).lerp(this.tmpC.set('#ffffff'), 0.2 + 0.3 * r.flash).multiplyScalar(0.7 + 0.5 * pulse + 0.4 * r.flash);
+      if (this.focus) {
+        // No glow, but the receptor still answers: lit on press, tinted by the judgment on a hit
+        r.ringMat.color.set(THEME.lane[i]!).lerp(r.flashColor, r.flash).multiplyScalar(0.75 + 0.25 * Math.max(r.press, r.flash));
+        r.fillMat.color.set(THEME.lane[i]!).lerp(r.flashColor, r.flash);
+        r.fillMat.opacity = Math.min(0.7, 0.35 * r.press + 0.6 * r.flash);
+      } else {
+        r.ringMat.color.set(THEME.lane[i]!).lerp(this.tmpC.set('#ffffff'), 0.2 + 0.3 * r.flash).multiplyScalar(0.7 + 0.5 * pulse + 0.4 * r.flash);
+        r.fillMat.color.set(THEME.lane[i]!);
+        r.fillMat.opacity = 0.4 * r.press + 0.3 * r.flash;
+      }
       r.ringMat.opacity = 0.95;
-      r.fillMat.opacity = 0.4 * r.press + 0.3 * r.flash;
       const b = this.beams[i]!;
       b.level = this.focus ? 0 : held ? Math.max(b.level * Math.exp(-f.dt * 6), 0.18) : b.level * Math.exp(-f.dt * 9);
       b.mat.uniforms.uAlpha!.value = b.level * 0.45;
