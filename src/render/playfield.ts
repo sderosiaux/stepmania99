@@ -12,6 +12,8 @@ import { THEME } from './theme';
 // ============================================================================
 
 export const LANE_SPACING = 1.12;
+/** Focus-mode receptor line at rest: light and neutral, so lane and judgment colors read on top of it */
+const FOCUS_TARGET = '#c9cde4';
 const LANE_X = [-1.5, -0.5, 0.5, 1.5].map((v) => v * LANE_SPACING);
 /** Arrow rotation per lane (shape points up) */
 const LANE_ROT = [Math.PI / 2, Math.PI, 0, -Math.PI / 2];
@@ -55,8 +57,36 @@ function arrowGeometry(): THREE.BufferGeometry {
   return g;
 }
 
-function arrowOutline(inner: number): THREE.BufferGeometry {
-  const outer = arrowShape(0.98);
+/** Constant-width stroke just inside the arrow's edge (earcut fails on near-full-size holes) */
+function arrowStroke(scale: number, width: number): THREE.BufferGeometry {
+  const pts = arrowShape(scale).getPoints();
+  if (pts.length > 1 && pts[0]!.equals(pts[pts.length - 1]!)) pts.pop();
+  const n = pts.length;
+  const area = pts.reduce((a, p, i) => a + p.x * pts[(i + 1) % n]!.y - pts[(i + 1) % n]!.x * p.y, 0);
+  const inward = (a: THREE.Vector2, b: THREE.Vector2) => {
+    const d = b.clone().sub(a).normalize();
+    // Interior is on the left of travel for counter-clockwise polygons
+    return area > 0 ? new THREE.Vector2(-d.y, d.x) : new THREE.Vector2(d.y, -d.x);
+  };
+  const positions: number[] = [];
+  const inner = pts.map((p, i) => {
+    const n1 = inward(pts[(i - 1 + n) % n]!, p);
+    const n2 = inward(p, pts[(i + 1) % n]!);
+    const miter = n1.clone().add(n2).normalize();
+    return p.clone().add(miter.multiplyScalar(width / Math.max(0.3, miter.dot(n1))));
+  });
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    const [o0, o1, i0, i1] = [pts[i]!, pts[j]!, inner[i]!, inner[j]!];
+    positions.push(o0.x, o0.y, 0, i0.x, i0.y, 0, o1.x, o1.y, 0, o1.x, o1.y, 0, i0.x, i0.y, 0, i1.x, i1.y, 0);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  return g;
+}
+
+function arrowOutline(inner: number, outerScale = 0.98): THREE.BufferGeometry {
+  const outer = arrowShape(outerScale);
   outer.holes.push(new THREE.Path(arrowShape(inner).getPoints().reverse()));
   return new THREE.ShapeGeometry(outer);
 }
@@ -271,7 +301,7 @@ export class Playfield {
   private readonly fade: THREE.InstancedBufferAttribute;
   private readonly mines: THREE.InstancedMesh;
 
-  private readonly receptors: { root: THREE.Group; ring: THREE.Mesh; ringMat: THREE.MeshBasicMaterial; fill: THREE.Mesh; fillMat: THREE.MeshBasicMaterial; press: number; flash: number; flashColor: THREE.Color }[] = [];
+  private readonly receptors: { root: THREE.Group; ring: THREE.Mesh; ringMat: THREE.MeshBasicMaterial; fill: THREE.Mesh; fillMat: THREE.MeshBasicMaterial; back: THREE.Mesh; target: THREE.Mesh; targetMat: THREE.MeshBasicMaterial; press: number; flash: number; flashColor: THREE.Color }[] = [];
   private readonly beams: { mesh: THREE.Mesh; mat: THREE.ShaderMaterial; level: number }[] = [];
   private readonly holdPool: HoldVisual[] = [];
   private readonly bursts: Burst[] = [];
@@ -325,6 +355,9 @@ export class Playfield {
     // Receptors
     const ringGeo = arrowOutline(0.7);
     const fillGeo = new THREE.ShapeGeometry(arrowShape(0.72));
+    // Focus target: a thin line on the note's outer edge (the note's dark outline is arrowShape(1.0),
+    // its colored body ends at ~0.91), drawn over the notes so the edge to match never disappears
+    const targetGeo = arrowStroke(1.0, 0.035);
     for (let i = 0; i < 4; i++) {
       const root = new THREE.Group();
       root.position.x = LANE_X[i]!;
@@ -335,9 +368,13 @@ export class Playfield {
       const fill = new THREE.Mesh(fillGeo, fillMat);
       const back = new THREE.Mesh(new THREE.ShapeGeometry(arrowShape(0.98)), new THREE.MeshBasicMaterial({ color: 0x07061a, transparent: true, opacity: 0.85, depthWrite: false }));
       back.position.z = -0.02;
-      root.add(back, fill, ring);
+      const targetMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide });
+      const target = new THREE.Mesh(targetGeo, targetMat);
+      target.renderOrder = 10;
+      target.visible = false;
+      root.add(back, fill, ring, target);
       this.group.add(root);
-      this.receptors.push({ root, ring, ringMat, fill, fillMat, press: 0, flash: 0, flashColor: new THREE.Color() });
+      this.receptors.push({ root, ring, ringMat, fill, fillMat, back, target, targetMat, press: 0, flash: 0, flashColor: new THREE.Color() });
     }
 
     // Notes (+ dark outline instanced behind)
@@ -572,14 +609,15 @@ export class Playfield {
       const held = f.held[i]!;
       r.press = held ? Math.max(r.press, 0.6) : r.press * Math.exp(-f.dt * 14);
       r.flash *= Math.exp(-f.dt * 10);
-      const s = 1 - 0.12 * r.press + 0.06 * pulse;
-      r.root.scale.setScalar(s);
+      // In focus the target never moves: scaling it on press would shift the edge you aim at
+      r.root.scale.setScalar(this.focus ? 1 : 1 - 0.12 * r.press + 0.06 * pulse);
+      r.ring.visible = r.fill.visible = r.back.visible = !this.focus;
+      r.target.visible = this.focus;
       // HDR color: values above 1 feed the bloom on the beat and on hits
       if (this.focus) {
-        // No glow, but the receptor still answers: lit on press, tinted by the judgment on a hit
-        r.ringMat.color.set(THEME.lane[i]!).lerp(r.flashColor, r.flash).multiplyScalar(0.75 + 0.25 * Math.max(r.press, r.flash));
-        r.fillMat.color.set(THEME.lane[i]!).lerp(r.flashColor, r.flash);
-        r.fillMat.opacity = Math.min(0.7, 0.35 * r.press + 0.6 * r.flash);
+        // Neutral line at rest, lane color while pressed, judgment color right after a hit
+        r.targetMat.color.set(FOCUS_TARGET).lerp(this.tmpC.set(THEME.lane[i]!), Math.min(1, r.press * 1.4)).lerp(r.flashColor, r.flash);
+        r.targetMat.opacity = 0.85 + 0.15 * Math.max(r.press, r.flash);
       } else {
         r.ringMat.color.set(THEME.lane[i]!).lerp(this.tmpC.set('#ffffff'), 0.2 + 0.3 * r.flash).multiplyScalar(0.7 + 0.5 * pulse + 0.4 * r.flash);
         r.fillMat.color.set(THEME.lane[i]!);

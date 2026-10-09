@@ -232,6 +232,7 @@ class App {
     if (e.code === 'Escape') {
       e.preventDefault();
       if (this.game.isPaused) return this.quitGame();
+      if (this.game.isResuming) return this.game.pause();
       if (this.game.canPause) return this.game.pause();
       if (this.multiplayer || this.last?.autoplay) {
         const now = performance.now();

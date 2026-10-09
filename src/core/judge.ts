@@ -104,6 +104,11 @@ export class JudgeEngine {
     return this.held[lane]!;
   }
 
+  /** Restore a lane's held state without judging anything (resume after pause) */
+  setHeld(lane: number, held: boolean): void {
+    this.held[lane] = held;
+  }
+
   /** Every note is resolved (tails included) */
   isComplete(): boolean {
     return this.cursor.every((c, lane) => c >= this.lanes[lane]!.length) && this.active.length === 0;

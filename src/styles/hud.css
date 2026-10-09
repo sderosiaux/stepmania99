@@ -149,3 +149,4 @@
 .hud.focus .hud-judgment-text, .hud.focus .hud-combo-num, .hud.focus .hud-score, .hud.focus .hud-msg { filter: none !important; text-shadow: none !important; animation: none !important; }
 .hud.focus .hud-judgment-text[data-grade='marvelous'] { background-image: linear-gradient(180deg, #ffffff, #bdf6ff); }
 .hud.focus .hud-life { box-shadow: none; }
+.hud-msg-count { margin-bottom: 34vh; font-size: clamp(5rem, 12vw, 9rem); color: #fff; -webkit-text-stroke: 3px rgba(5, 4, 13, 0.85); paint-order: stroke fill; text-shadow: 0 0 40px var(--accent-cyan); }

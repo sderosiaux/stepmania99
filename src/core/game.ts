@@ -37,7 +37,7 @@ import { multiplayerGameManager } from '../multiplayer/game-manager';
 const LEAD_IN_MS = 3200;
 /** Misses are declared this late so an input event dispatched after a frame still gets its chance */
 const INPUT_GRACE_MS = 25;
-const RESUME_REWIND_MS = 2000;
+const RESUME_COUNTDOWN_MS = 1500;
 const ASSIST_LOOKAHEAD_MS = 250;
 const OUTRO_MS = 1200;
 const PRACTICE_LEAD_MS = 2000;
@@ -53,7 +53,8 @@ export interface GameOptions {
   paceTarget?: { label: string; percentage: number };
 }
 
-type Phase = 'playing' | 'paused' | 'outro' | 'done';
+/** resuming = frozen field with a 3-2-1 countdown, then play from the exact pause point */
+type Phase = 'playing' | 'paused' | 'resuming' | 'outro' | 'done';
 
 export class GameController {
   private song!: Song;
@@ -71,6 +72,8 @@ export class GameController {
   private startMs = 0;
   private endMs = 0;
   private pausedAt = 0;
+  private resumeAt = 0;
+  private countdownShown = 0;
   private loop = 1;
 
   private auto: SyntheticInput[] = [];
@@ -246,6 +249,10 @@ export class GameController {
     return this.phase === 'paused';
   }
 
+  get isResuming(): boolean {
+    return this.phase === 'resuming';
+  }
+
   get isPlaying(): boolean {
     return this.phase === 'playing';
   }
@@ -264,6 +271,11 @@ export class GameController {
   }
 
   pause(): void {
+    if (this.phase === 'resuming') {
+      this.phase = 'paused';
+      this.hud.showPause(true, false);
+      return;
+    }
     if (!this.canPause) return;
     const now = performance.now();
     const raw = audio.songTimeAt(now);
@@ -278,15 +290,33 @@ export class GameController {
     this.hud.showPause(true, false);
   }
 
+  /** Field stays frozen through a 3-2-1, then the song continues from the exact pause point */
   resume(): void {
     if (this.phase !== 'paused') return;
     input.drain();
     this.hud.showPause(false, false);
+    this.phase = 'resuming';
+    this.resumeAt = performance.now() + RESUME_COUNTDOWN_MS;
+    this.countdownShown = 0;
+  }
+
+  private tickResume(now: number): void {
+    const left = Math.ceil((this.resumeAt - now) / (RESUME_COUNTDOWN_MS / 3));
+    if (left > 0) {
+      if (left !== this.countdownShown) {
+        this.countdownShown = left;
+        this.hud.message(String(left), 'count', RESUME_COUNTDOWN_MS / 3 - 20);
+        audio.play1('ui-move', { gain: 0.7 });
+      }
+      return;
+    }
+    input.drain();
+    // Lanes held through the countdown keep their freezes alive
+    for (let lane = 0; lane < 4; lane++) this.judge.setHeld(lane, input.isLaneHeld(lane));
     this.phase = 'playing';
-    const from = this.pausedAt - RESUME_REWIND_MS * this.rate;
-    this.assistIdx = this.assistRows.findIndex((t) => t >= from);
+    this.assistIdx = this.assistRows.findIndex((t) => t >= this.pausedAt);
     if (this.assistIdx < 0) this.assistIdx = this.assistRows.length;
-    audio.play(from, 400);
+    audio.play(this.pausedAt, 120);
   }
 
   private onVisibility = () => {
@@ -328,6 +358,8 @@ export class GameController {
     } else if (this.phase === 'outro') {
       input.drain();
       if (now >= this.outroAt) this.finish();
+    } else if (this.phase === 'resuming') {
+      this.tickResume(now);
     } else {
       input.drain();
     }
@@ -492,7 +524,7 @@ export class GameController {
   // --------------------------------------------------------------------------
 
   private render(songNow: number, time: number, dt: number): void {
-    const frozen = this.phase === 'paused' ? this.lastSongTime : songNow;
+    const frozen = this.phase === 'paused' || this.phase === 'resuming' ? this.lastSongTime : songNow;
     this.lastSongTime = frozen;
     const beat = this.timing.timeToBeat(frozen);
     const { width, height } = this.stage.size;
