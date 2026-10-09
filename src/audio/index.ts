@@ -20,8 +20,11 @@ export type SfxId =
   | 'vo-welcome';
 
 interface SfxManifest {
-  assets: Record<string, { file: string; kind: 'sfx' | 'voice' }>;
+  assets: Record<string, { file: string; kind: 'sfx' | 'voice' | 'music'; bpm?: number; loopStartMs?: number; loopEndMs?: number }>;
 }
+
+/** Menu loop: title, song select (until a preview takes over) and results */
+const MENU_MUSIC = 'music-menu';
 
 const SCHEDULE_MARGIN_S = 0.03;
 /** -40 dBFS: first sample louder than this is the attack */
@@ -53,6 +56,8 @@ export class AudioEngine {
 
   private musicCache = new Map<string, Promise<AudioBuffer>>();
   private sfx = new Map<string, { buffer: AudioBuffer; kind: 'sfx' | 'voice'; onset: number }>();
+  private menuTrack: { buffer: AudioBuffer; bpm: number; loopStart: number; loopEnd: number } | null = null;
+  private menu: { source: AudioBufferSourceNode; gain: GainNode; startCtx: number } | null = null;
   private sfxLoading: Promise<void> | null = null;
 
   // Song timeline
@@ -138,7 +143,18 @@ export class AudioEngine {
             try {
               const r = await fetch(`${BASE}sfx/${a.file}`);
               const buffer = await this.context.decodeAudioData(await r.arrayBuffer());
-              this.sfx.set(id, { buffer, kind: a.kind, onset: onsetSeconds(buffer) });
+              if (a.kind === 'music') {
+                if (id === MENU_MUSIC) {
+                  this.menuTrack = {
+                    buffer,
+                    bpm: a.bpm ?? 120,
+                    loopStart: (a.loopStartMs ?? 0) / 1000,
+                    loopEnd: (a.loopEndMs ?? buffer.duration * 1000) / 1000,
+                  };
+                }
+              } else {
+                this.sfx.set(id, { buffer, kind: a.kind, onset: onsetSeconds(buffer) });
+              }
             } catch (e) {
               console.warn(`SFX ${id} failed to load`, e);
             }
@@ -317,10 +333,56 @@ export class AudioEngine {
   // Song-select preview: looped excerpt with fades, independent from the song timeline
   // --------------------------------------------------------------------------
 
+  // --------------------------------------------------------------------------
+  // Menu music: a seamless loop that yields to song previews and gameplay
+  // --------------------------------------------------------------------------
+
+  playMenuMusic(fadeInMs = 1200): void {
+    const ctx = this.ctx;
+    const track = this.menuTrack;
+    if (!ctx || ctx.state !== 'running' || !track || this.menu || this.preview) return;
+    const source = ctx.createBufferSource();
+    source.buffer = track.buffer;
+    source.loop = true;
+    source.loopStart = track.loopStart;
+    source.loopEnd = track.loopEnd;
+    const gain = ctx.createGain();
+    const now = ctx.currentTime;
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(0.75, now + fadeInMs / 1000);
+    source.connect(gain).connect(this.buses!.music);
+    const startCtx = now + SCHEDULE_MARGIN_S;
+    source.start(startCtx, track.loopStart);
+    this.menu = { source, gain, startCtx };
+  }
+
+  stopMenuMusic(fadeMs = 400): void {
+    const m = this.menu;
+    if (!m || !this.ctx) return;
+    this.menu = null;
+    const now = this.ctx.currentTime;
+    m.gain.gain.cancelScheduledValues(now);
+    m.gain.gain.setValueAtTime(m.gain.gain.value, now);
+    m.gain.gain.linearRampToValueAtTime(0, now + fadeMs / 1000);
+    m.source.stop(now + fadeMs / 1000 + 0.02);
+  }
+
+  /** Beat of the menu loop heard at `perfMs`, or null when it is not playing */
+  menuBeatAt(perfMs: number): number | null {
+    const m = this.menu;
+    const t = this.menuTrack;
+    if (!m || !t || !this.clock) return null;
+    const elapsed = this.clock.ctxTimeAt(perfMs) - m.startCtx;
+    if (elapsed < 0) return null;
+    const pos = t.loopStart + (elapsed % (t.loopEnd - t.loopStart));
+    return (pos * t.bpm) / 60;
+  }
+
   async playPreview(url: string, startSec: number, lengthSec: number): Promise<void> {
     const token = ++this.previewToken;
     if (this.preview?.url === url) return;
     this.stopPreview();
+    this.stopMenuMusic(500);
     let buffer: AudioBuffer;
     try {
       buffer = await this.loadMusic(url);

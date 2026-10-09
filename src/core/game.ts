@@ -121,6 +121,7 @@ export class GameController {
     await audio.unlock();
     if (this.stopped) return;
     audio.stopPreview(150);
+    audio.stopMenuMusic(300);
     audio.setVolumes({ music: this.settings.musicVolume, sfx: this.settings.sfxVolume, voice: this.settings.voiceVolume });
     void audio.loadSfx();
 

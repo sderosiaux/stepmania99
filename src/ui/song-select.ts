@@ -7,7 +7,7 @@ import { audio } from '../audio';
 import { multiplayerClient, type MultiplayerEvent } from '../multiplayer';
 import { chartStats, type ChartStats } from './chart-stats';
 import { getBest, getLastRunErrors } from './storage';
-import { escapeHtml, assetUrl, fitCanvas } from './dom';
+import { escapeHtml, assetUrl, fitCanvas, toast } from './dom';
 import { THEME } from '../render/theme';
 import { openMultiplayerModal, roomBarHtml, bindRoomBar } from './multiplayer-ui';
 
@@ -51,6 +51,8 @@ export class SongSelectScreen {
   private wheelItems = new Map<string, HTMLElement>();
   private previewTimer = 0;
   private visible = false;
+  /** Previews start at the first navigation: arriving on the screen keeps the menu music */
+  private previewArmed = false;
   /** Section to loop, per song+difficulty */
   private practice = new Map<string, PracticeRange>();
   /** Loaded simfile + stats for the focused chart (null while loading) */
@@ -88,7 +90,10 @@ export class SongSelectScreen {
       { passive: false }
     );
     const search = this.searchInput;
-    search.addEventListener('input', () => this.applySearch(search.value));
+    search.addEventListener('input', () => {
+      this.previewArmed = true;
+      this.applySearch(search.value);
+    });
     search.addEventListener('keydown', (e) => {
       if (e.code === 'Escape') {
         search.value = '';
@@ -117,6 +122,8 @@ export class SongSelectScreen {
       this.applySearch(this.query, false);
     }
     this.visible = true;
+    this.previewArmed = false;
+    audio.playMenuMusic();
     this.root.classList.remove('hidden');
     this.root.querySelector('.select-empty')!.classList.toggle('hidden', this.all.length > 0);
     window.addEventListener('keydown', this.onKey);
@@ -251,6 +258,9 @@ export class SongSelectScreen {
       case 'KeyM':
         this.openMultiplayer();
         break;
+      case 'KeyL':
+        void this.copyLink();
+        break;
       default:
         return;
     }
@@ -262,6 +272,7 @@ export class SongSelectScreen {
     const next = (((this.index + delta) % this.list.length) + this.list.length) % this.list.length;
     if (next === this.index) return;
     this.index = next;
+    this.previewArmed = true;
     audio.play1('ui-move', { gain: 0.6 });
     this.renderWheel();
     this.renderDetail();
@@ -366,7 +377,59 @@ export class SongSelectScreen {
   // Multiplayer sync
   // --------------------------------------------------------------------------
 
+  // --------------------------------------------------------------------------
+  // Shareable URL: ?song=<id>&diff=<Difficulty> always mirrors the focused chart
+  // --------------------------------------------------------------------------
+
+  /** Focus a song by id (deep link). Returns false when it is not in the library. */
+  focusSong(id: string, difficulty?: string | null): boolean {
+    if (!this.list.some((e) => e.id === id)) this.applySearch('', false);
+    const i = this.list.findIndex((e) => e.id === id);
+    if (i < 0) return false;
+    this.index = i;
+    const d = DIFFS.find((x) => x === difficulty);
+    if (d) this.diff = d;
+    if (this.visible) {
+      this.renderWheel();
+      this.renderDetail();
+    }
+    this.syncUrl();
+    return true;
+  }
+
+  static linkFor(entry: SongEntry, difficulty: Difficulty): string {
+    const url = new URL(window.location.href);
+    url.search = '';
+    url.searchParams.set('song', entry.id);
+    url.searchParams.set('diff', difficulty);
+    return url.toString();
+  }
+
+  private syncUrl(): void {
+    const cur = this.current;
+    if (!cur) return;
+    const url = new URL(window.location.href);
+    url.searchParams.set('song', cur.entry.id);
+    url.searchParams.set('diff', cur.meta.difficulty);
+    url.searchParams.delete('play');
+    url.searchParams.delete('autoplay');
+    window.history.replaceState(null, '', url.toString());
+  }
+
+  private async copyLink(): Promise<void> {
+    const cur = this.current;
+    if (!cur) return;
+    try {
+      await navigator.clipboard.writeText(SongSelectScreen.linkFor(cur.entry, cur.meta.difficulty));
+      audio.play1('ui-select', { gain: 0.6 });
+      toast(`Link to ${cur.entry.title} (${cur.meta.difficulty}) copied`, 2200);
+    } catch {
+      toast('Could not access the clipboard: copy the address bar instead', 3000);
+    }
+  }
+
   private broadcast(): void {
+    this.syncUrl();
     if (!multiplayerClient.getRoom() || !multiplayerClient.isHost()) return;
     const cur = this.current;
     const nav: HostNavigationState = { packIndex: 0, songIndex: this.index };
@@ -386,6 +449,7 @@ export class SongSelectScreen {
       const i = nav.songId ? this.list.findIndex((s) => s.id === nav.songId) : -1;
       if (i >= 0) this.index = i;
       if (nav.difficulty) this.diff = nav.difficulty;
+      this.previewArmed = true;
       if (this.visible) {
         this.renderWheel();
         this.renderDetail();
@@ -551,6 +615,7 @@ export class SongSelectScreen {
           : `<button class="btn btn-play" data-act="play"><kbd>Enter</kbd> Play</button>
              <button class="btn btn-ghost" data-act="practice"><kbd>S</kbd> Practice</button>
              <button class="btn btn-ghost" data-act="demo"><kbd>A</kbd> Autoplay</button>`}
+        <button class="btn btn-ghost" data-act="link" title="Copy a link that opens this chart"><kbd>L</kbd> Share</button>
       </div>`;
 
     el.querySelectorAll<HTMLElement>('.rung:not(.empty)').forEach((r) =>
@@ -564,6 +629,7 @@ export class SongSelectScreen {
     );
     el.querySelector('[data-act="play"]')?.addEventListener('click', () => this.play(false));
     el.querySelector('[data-act="demo"]')?.addEventListener('click', () => this.play(true));
+    el.querySelector('[data-act="link"]')?.addEventListener('click', () => void this.copyLink());
     el.querySelector('[data-act="practice"]')?.addEventListener('click', () => this.startPractice());
     this.bindRangeDrag(el.querySelector('.density-wrap') as HTMLElement);
 
@@ -726,11 +792,12 @@ export class SongSelectScreen {
   private queuePreview(): void {
     clearTimeout(this.previewTimer);
     const cur = this.current;
-    if (!cur) return;
+    if (!cur || !this.previewArmed) return;
     this.previewTimer = window.setTimeout(() => {
       if (!this.visible) return;
       if (cur.entry.silent) {
         audio.stopPreview();
+        audio.playMenuMusic(600);
         return;
       }
       void audio.playPreview(`${songDir(cur.entry)}/${cur.entry.musicFile}`, cur.entry.previewStart, cur.entry.previewLength);

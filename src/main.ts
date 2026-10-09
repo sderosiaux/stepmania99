@@ -106,7 +106,9 @@ class App {
       audio.setVolumes({ music: this.settings.musicVolume, sfx: this.settings.sfxVolume, voice: this.settings.voiceVolume });
       await audio.loadSfx();
       audio.play1('ui-start');
-      audio.play1('vo-welcome');
+      audio.playMenuMusic(1500);
+      // The announcer lands on the music, not on silence
+      setTimeout(() => audio.play1('vo-welcome', { duck: true, gain: 0.85 }), 900);
       title.classList.add('leaving');
       setTimeout(() => {
         title.remove();
@@ -129,12 +131,15 @@ class App {
     this.showSelect();
     const room = params.get('room');
     if (room) void this.select.joinFromUrl(room);
+    // ?song=<id>&diff=<Difficulty> focuses a chart; &play=1 starts it, &autoplay=1 starts the demo
     const songId = params.get('song');
-    if (songId) {
-      const entry = this.songs.find((s) => s.id === songId);
-      const meta = entry?.charts.find((c) => c.difficulty === params.get('diff')) ?? entry?.charts[entry.charts.length - 1];
-      if (entry && meta) void this.play(entry, meta.difficulty, params.get('autoplay') === '1');
+    if (!songId) return;
+    if (!this.select.focusSong(songId, params.get('diff'))) {
+      toast(`"${songId}" is not in this song library`, 4000);
+      return;
     }
+    const cur = this.select.current;
+    if (cur && (params.get('play') === '1' || params.get('autoplay') === '1')) void this.play(cur.entry, cur.meta.difficulty, params.get('autoplay') === '1');
   }
 
   private showSelect(): void {
@@ -147,6 +152,7 @@ class App {
   private showCalibration(): void {
     this.screen = 'calibration';
     this.select.hide();
+    audio.stopMenuMusic(300);
     void this.calibration.show(this.settings.offsetMs);
   }
 
@@ -199,6 +205,8 @@ class App {
           lossCurve: r.lossCurve,
         });
     this.results.show(r, record, this.multiplayer);
+    // Music comes back once the grade has been announced
+    setTimeout(() => this.screen === 'results' && audio.playMenuMusic(2500), 3600);
   }
 
   private quitGame(): void {
@@ -285,7 +293,7 @@ class App {
     const dt = Math.min(0.1, (now - this.menuLast) / 1000);
     this.menuLast = now;
     audio.sync();
-    let beat = (now / 1000) * (96 / 60);
+    let beat = audio.menuBeatAt(now) ?? (now / 1000) * (96 / 60);
     const cur = this.screen === 'song-select' ? this.select.current : null;
     const previewMs = audio.previewTimeAt(now);
     if (cur && previewMs !== null) {
