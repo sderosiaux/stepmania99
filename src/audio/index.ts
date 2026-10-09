@@ -20,7 +20,7 @@ export type SfxId =
   | 'vo-welcome';
 
 interface SfxManifest {
-  assets: Record<string, { file: string; kind: 'sfx' | 'voice' | 'music'; bpm?: number; loopStartMs?: number; loopEndMs?: number }>;
+  assets: Record<string, { file: string; kind: 'sfx' | 'voice' | 'music'; bpm?: number; loopStartMs?: number; loopEndMs?: number; beatOffsetMs?: number }>;
 }
 
 /** Menu loop: title, song select (until a preview takes over) and results */
@@ -56,7 +56,7 @@ export class AudioEngine {
 
   private musicCache = new Map<string, Promise<AudioBuffer>>();
   private sfx = new Map<string, { buffer: AudioBuffer; kind: 'sfx' | 'voice'; onset: number }>();
-  private menuTrack: { buffer: AudioBuffer; bpm: number; loopStart: number; loopEnd: number } | null = null;
+  private menuTrack: { buffer: AudioBuffer; bpm: number; loopStart: number; loopEnd: number; beatOffset: number } | null = null;
   private menu: { source: AudioBufferSourceNode; gain: GainNode; startCtx: number } | null = null;
   private sfxLoading: Promise<void> | null = null;
 
@@ -150,6 +150,7 @@ export class AudioEngine {
                     bpm: a.bpm ?? 120,
                     loopStart: (a.loopStartMs ?? 0) / 1000,
                     loopEnd: (a.loopEndMs ?? buffer.duration * 1000) / 1000,
+                    beatOffset: (a.beatOffsetMs ?? 0) / 1000,
                   };
                 }
               } else {
@@ -375,14 +376,14 @@ export class AudioEngine {
     const elapsed = this.clock.ctxTimeAt(perfMs) - m.startCtx;
     if (elapsed < 0) return null;
     const pos = t.loopStart + (elapsed % (t.loopEnd - t.loopStart));
-    return (pos * t.bpm) / 60;
+    return ((pos - t.beatOffset) * t.bpm) / 60;
   }
 
   async playPreview(url: string, startSec: number, lengthSec: number): Promise<void> {
-    const token = ++this.previewToken;
     if (this.preview?.url === url) return;
     this.stopPreview();
-    this.stopMenuMusic(500);
+    // After stopPreview(), which bumps the token itself: taking it before made every load look stale
+    const token = ++this.previewToken;
     let buffer: AudioBuffer;
     try {
       buffer = await this.loadMusic(url);
@@ -390,6 +391,8 @@ export class AudioEngine {
       return;
     }
     if (token !== this.previewToken || !this.ctx) return;
+    // Handover only once the preview can actually play: no silent gap while a long file decodes
+    this.stopMenuMusic(500);
     const ctx = this.ctx;
     const start = Math.min(Math.max(0, startSec), Math.max(0, buffer.duration - 1));
     const end = Math.min(buffer.duration, start + Math.max(4, lengthSec));

@@ -14,7 +14,7 @@ import { applyThemeVars } from './render/theme';
 import { SongSelectScreen } from './ui/song-select';
 import { ResultsScreen } from './ui/results';
 import { CalibrationScreen } from './ui/calibration';
-import { toast } from './ui/dom';
+import { toast, escapeHtml } from './ui/dom';
 import { loadSettings, saveSettings, submitScore, getBest, saveLastRunErrors } from './ui/storage';
 import { multiplayerClient, multiplayerGameManager, type MultiplayerEvent } from './multiplayer';
 
@@ -91,7 +91,20 @@ class App {
     this.screen = 'title';
     const title = document.createElement('div');
     title.className = 'title-screen';
-    title.innerHTML = `
+    // A shared song link lands on that song: the click is still needed to unlock audio, but no attract-mode intro
+    const params = new URLSearchParams(window.location.search);
+    const linked = this.songs.find((s) => s.id === params.get('song'));
+    const diff = linked?.charts.find((c) => c.difficulty === params.get('diff')) ?? linked?.charts[linked.charts.length - 1];
+    title.innerHTML = linked
+      ? `
+      <div class="title-linked">
+        <div class="title-linked-pack">${escapeHtml(linked.pack)}</div>
+        <div class="title-linked-song">${escapeHtml(linked.title)}</div>
+        <div class="title-linked-artist">${escapeHtml(linked.artist)}${diff ? ` · <b data-diff="${diff.difficulty}">${diff.difficulty.toUpperCase()} ${diff.level}</b>` : ''}</div>
+      </div>
+      <button class="title-start">PRESS <kbd>ENTER</kbd></button>
+      <p class="title-foot">STEPMANIA 99 · headphones recommended</p>`
+      : `
       <div class="title-logo"><span class="title-step">STEPMANIA</span><span class="title-99" data-text="99">99</span></div>
       <p class="title-tag">Rhythm battle royale</p>
       <button class="title-start">PRESS <kbd>ENTER</kbd></button>
@@ -105,10 +118,14 @@ class App {
       await audio.unlock();
       audio.setVolumes({ music: this.settings.musicVolume, sfx: this.settings.sfxVolume, voice: this.settings.voiceVolume });
       await audio.loadSfx();
-      audio.play1('ui-start');
-      audio.playMenuMusic(1500);
-      // The announcer lands on the music, not on silence
-      setTimeout(() => audio.play1('vo-welcome', { duck: true, gain: 0.85 }), 900);
+      if (linked) {
+        audio.play1('ui-select');
+      } else {
+        audio.play1('ui-start');
+        audio.playMenuMusic(1500);
+        // The announcer lands on the music, not on silence
+        setTimeout(() => audio.play1('vo-welcome', { duck: true, gain: 0.85 }), 900);
+      }
       title.classList.add('leaving');
       setTimeout(() => {
         title.remove();

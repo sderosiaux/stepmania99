@@ -381,7 +381,7 @@ export class SongSelectScreen {
   // Shareable URL: ?song=<id>&diff=<Difficulty> always mirrors the focused chart
   // --------------------------------------------------------------------------
 
-  /** Focus a song by id (deep link). Returns false when it is not in the library. */
+  /** Focus a song by id (deep link) and play its preview. Returns false when it is not in the library. */
   focusSong(id: string, difficulty?: string | null): boolean {
     if (!this.list.some((e) => e.id === id)) this.applySearch('', false);
     const i = this.list.findIndex((e) => e.id === id);
@@ -389,9 +389,12 @@ export class SongSelectScreen {
     this.index = i;
     const d = DIFFS.find((x) => x === difficulty);
     if (d) this.diff = d;
+    this.previewArmed = true;
+    audio.stopMenuMusic(300);
     if (this.visible) {
       this.renderWheel();
       this.renderDetail();
+      this.queuePreview();
     }
     this.syncUrl();
     return true;

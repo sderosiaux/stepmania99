@@ -1,4 +1,4 @@
-// Usage: ELEVENLABS_API_KEY=... node scripts/generate-sfx.mjs [--force] [--only id1,id2] [--reprocess]
+// Usage: ELEVENLABS_API_KEY=... GEMINI_API_KEY=... node scripts/generate-sfx.mjs [--force] [--only id1,id2] [--reprocess]
 
 import fs from 'fs';
 import os from 'os';
@@ -18,8 +18,18 @@ const VOICE_ID = 'pNInz6obpgDQGcFmaJgB'; // Adam (premade): deep, dominant male
 const VOICE_MODEL = 'eleven_v3'; // honours [shouts]-style audio tags; multilingual_v2 reads them aloud
 const VOICE_SETTINGS = { stability: 0.0, similarity_boost: 0.8, style: 0.8, use_speaker_boost: true };
 
+// ElevenLabs' Music API is paid-plan only, so music comes from Lyria via the Gemini Interactions API.
+const GEMINI_API = 'https://generativelanguage.googleapis.com/v1beta';
+const MUSIC_MODEL = 'lyria-3.5';
+// Each side of a music loop carries this much periodic extension (the loop's own tail before, its head after),
+// so a decoder that ignores the MP3 encoder-delay header (~25 ms shift) still lands loop points inside periodic audio.
+const MUSIC_PAD_MS = 100;
+// The first seconds of a generation tend to settle (intro fills, mix still opening), so the loop starts after this.
+const MUSIC_SKIP_SEC = 10;
+const MUSIC_XFADE_SEC = 0.03;
+
 // Integrated-loudness targets (LUFS) per kind; gainDb is an offset from these.
-const TARGET_LUFS = { voice: -16, sfx: -18 };
+const TARGET_LUFS = { voice: -16, sfx: -18, music: -16 };
 const PEAK_CEILING_DB = -1;
 
 // The API's minimum duration is 0.5 s, so sub-500 ms sounds are generated at 0.5 s and cut to maxMs.
@@ -81,7 +91,16 @@ const ASSETS = [
   { id: 'vo-grade-c', kind: 'voice', text: 'C rank.' }, // [neutral] is read aloud by v3
   { id: 'vo-grade-d', kind: 'voice', text: 'D rank...', tag: 'disappointed' },
   { id: 'vo-welcome', kind: 'voice', text: 'Stepmania ninety-nine!', tag: 'shouts' },
+
+  // Music. Lyria has no tempo parameter, so the real tempo is measured and the loop is varispeeded to `bpm`.
+  // The prompt asks for ~84 s so a 32-bar loop fits after MUSIC_SKIP_SEC and before the generation's ending.
+  { id: 'music-menu', kind: 'music', bpm: 120, bars: 32,
+    prompt: `Instrumental synthwave retro arcade menu music, 120 BPM, 4/4, constant tempo. Driving but not busy: warm analog pads, punchy drums with four-on-the-floor kick, pulsing synth bass, arpeggiated synth lead. Instrumental only, no vocals.
+[0:00 - 1:24] One continuous groove at full steady energy from the first second to the last. No intro build, no breakdown, no stops or silent breaks, no drop, no outro, no fade in, no fade out, no ending.` },
 ];
+
+const loopMs = (asset) => (asset.bars * 4 * 60_000) / asset.bpm;
+const rawFile = (asset) => path.join(rawDir, `${asset.id}.${asset.kind === 'music' ? 'wav' : 'mp3'}`);
 
 function parseArgs(argv) {
   const only = argv.includes('--only') ? argv[argv.indexOf('--only') + 1]?.split(',').filter(Boolean) : null;
@@ -107,7 +126,21 @@ async function callApi(url, body) {
   return Buffer.from(await res.arrayBuffer());
 }
 
+async function generateMusic(asset) {
+  const res = await fetch(`${GEMINI_API}/interactions`, {
+    method: 'POST',
+    headers: { 'x-goog-api-key': process.env.GEMINI_API_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: MUSIC_MODEL, input: asset.prompt, response_format: { type: 'audio', mime_type: 'audio/wav' } }),
+  });
+  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  const json = await res.json();
+  const audio = json.steps?.flatMap((step) => step.content ?? []).find((c) => c.type === 'audio');
+  if (!audio) throw new Error(`Lyria returned no audio (status ${json.status})`);
+  return Buffer.from(audio.data, 'base64');
+}
+
 function generate(asset) {
+  if (asset.kind === 'music') return generateMusic(asset);
   if (asset.kind === 'voice') {
     const text = asset.tag ? `[${asset.tag}] ${asset.text}` : asset.text;
     return callApi(`${API}/text-to-speech/${VOICE_ID}?output_format=mp3_44100_128`, {
@@ -144,8 +177,8 @@ function durationMs(file) {
   return Math.round(Number(out) * 1000);
 }
 
-function decode(file) {
-  const raw = execFileSync('ffmpeg', ['-hide_banner', '-v', 'error', '-i', file, '-ac', '1', '-f', 'f32le', '-'], { maxBuffer: 64 << 20 });
+function decode(file, channels = 1) {
+  const raw = execFileSync('ffmpeg', ['-hide_banner', '-v', 'error', '-i', file, '-ac', String(channels), '-f', 'f32le', '-'], { maxBuffer: 1 << 30 });
   return new Float32Array(raw.buffer, raw.byteOffset, raw.length / 4);
 }
 
@@ -218,6 +251,302 @@ function postProcess(asset, rawPath, outPath) {
   return { level, target, gain, peak: peakDb(samples), lead: leadMs(samples), peakCapped: gain < target - level - 0.05 };
 }
 
+function sampleRate(file) {
+  return Number(execFileSync('ffprobe', ['-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=sample_rate', '-of', 'csv=p=0', file]).toString());
+}
+
+// In-place iterative radix-2 FFT.
+function fft(re, im) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      [re[i], re[j]] = [re[j], re[i]];
+      [im[i], im[j]] = [im[j], im[i]];
+    }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = (-2 * Math.PI) / len;
+    const wr = Math.cos(ang);
+    const wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let cr = 1;
+      let ci = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const a = i + k;
+        const b = a + len / 2;
+        const tr = re[b] * cr - im[b] * ci;
+        const ti = re[b] * ci + im[b] * cr;
+        re[b] = re[a] - tr;
+        im[b] = im[a] - ti;
+        re[a] += tr;
+        im[a] += ti;
+        [cr, ci] = [cr * wr - ci * wi, cr * wi + ci * wr];
+      }
+    }
+  }
+}
+
+// Log energies in 32 log-spaced bands per frame, plus spectral flux.
+function spectralFeatures(samples, sr, hop = 128, size = 1024) {
+  const nBands = 32;
+  const edges = Array.from({ length: nBands + 1 }, (_, b) => Math.round((40 * (16000 / 40) ** (b / nBands) * size) / sr));
+  const window = Float32Array.from({ length: size }, (_, i) => 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / size));
+  const frames = Math.floor((samples.length - size) / hop);
+  const bands = new Float32Array(frames * nBands);
+  const flux = new Float32Array(frames);
+  const level = new Float32Array(frames);
+  const re = new Float64Array(size);
+  const im = new Float64Array(size);
+  for (let f = 0; f < frames; f++) {
+    for (let i = 0; i < size; i++) {
+      re[i] = samples[f * hop + i] * window[i];
+      im[i] = 0;
+    }
+    fft(re, im);
+    let total = 0;
+    for (let b = 0; b < nBands; b++) {
+      let e = 0;
+      for (let k = edges[b]; k < Math.max(edges[b + 1], edges[b] + 1); k++) e += re[k] * re[k] + im[k] * im[k];
+      total += e;
+      const v = Math.log10(e + 1e-6);
+      bands[f * nBands + b] = v;
+      if (f > 0) flux[f] += Math.max(0, v - bands[(f - 1) * nBands + b]);
+    }
+    level[f] = 10 * Math.log10(total + 1e-12);
+  }
+  // Frame f covers samples [f*hop, f*hop+size); its onset response is centred, hence the offset.
+  return { bands, nBands, flux, level, frames, hopSec: hop / sr, offsetSec: size / 2 / sr };
+}
+
+const interp = (arr, x) => {
+  const i = Math.floor(x);
+  return i < 0 || i + 1 >= arr.length ? 0 : arr[i] + (arr[i + 1] - arr[i]) * (x - i);
+};
+
+// Vertex of the parabola through (−1, a), (0, b), (1, c): sub-frame refinement of a discrete maximum.
+const parabolic = (a, b, c) => (a - 2 * b + c === 0 ? 0 : (0.5 * (a - c)) / (a - 2 * b + c));
+
+function pearson(x, y) {
+  const n = x.length;
+  let mx = 0;
+  let my = 0;
+  for (let i = 0; i < n; i++) {
+    mx += x[i];
+    my += y[i];
+  }
+  mx /= n;
+  my /= n;
+  let sxy = 0;
+  let sxx = 0;
+  let syy = 0;
+  for (let i = 0; i < n; i++) {
+    sxy += (x[i] - mx) * (y[i] - my);
+    sxx += (x[i] - mx) ** 2;
+    syy += (y[i] - my) ** 2;
+  }
+  return sxy / Math.sqrt(sxx * syy + 1e-12);
+}
+
+// Finds a loop of exactly bars*4 beats starting on a (detected) downbeat, choosing the start whose
+// continuation after one loop length looks most like the start itself, so the seam is musically continuous.
+function findLoop(feat, asset) {
+  const { flux, level, frames, hopSec, offsetSec, bands, nBands } = feat;
+  const sorted = Array.from(level).sort((a, b) => a - b);
+  const median = sorted[sorted.length >> 1];
+  // Usable audio ends where the smoothed level falls 6 dB under the median (the generation's ending/fade).
+  const smooth = Math.round(1 / hopSec);
+  let usableEnd = frames - 1;
+  while (usableEnd > smooth) {
+    let m = 0;
+    for (let i = usableEnd - smooth; i < usableEnd; i++) m += level[i];
+    if (m / smooth >= median - 6) break;
+    usableEnd -= smooth >> 2;
+  }
+
+  const t0 = Math.round(MUSIC_SKIP_SEC / hopSec);
+  // Beat period from the flux autocorrelation, searched within 100–150 BPM.
+  const acf = (lag) => {
+    let s = 0;
+    for (let i = t0; i + lag < usableEnd; i++) s += flux[i] * flux[i + lag];
+    return s;
+  };
+  const lags = [];
+  for (let lag = Math.floor(0.4 / hopSec); lag <= Math.ceil(0.6 / hopSec); lag++) lags.push([lag, acf(lag)]);
+  const best = lags.reduce((a, b) => (b[1] > a[1] ? b : a));
+  const period = best[0] + parabolic(acf(best[0] - 1), best[1], acf(best[0] + 1));
+
+  // Beat phase: the grid offset that collects the most onset energy.
+  let phase = 0;
+  let phaseScore = -1;
+  for (let p = 0; p < period; p += 0.25) {
+    let s = 0;
+    for (let t = t0 + p; t < usableEnd; t += period) s += interp(flux, t);
+    if (s > phaseScore) [phase, phaseScore] = [p, s];
+  }
+  // Downbeat: chords change on bar lines, so pick the beat (mod 4) where the average spectrum of the
+  // beat differs most from the previous beat. A four-on-the-floor kick carries no bar accent to use instead.
+  const beatMean = (t) => {
+    const v = new Float32Array(nBands);
+    const from = Math.round(t);
+    for (let f = from; f < from + Math.round(period); f++) for (let b = 0; b < nBands; b++) v[b] += bands[f * nBands + b];
+    return v;
+  };
+  const changeByBeat = [0, 1, 2, 3].map((m) => {
+    let s = 0;
+    let n = 0;
+    for (let t = t0 + phase + (m + 4) * period; t + period < usableEnd; t += 4 * period) {
+      s += 1 - pearson(beatMean(t - period), beatMean(t));
+      n++;
+    }
+    return s / n;
+  });
+  const downbeat = changeByBeat.indexOf(Math.max(...changeByBeat));
+
+  const beats = asset.bars * 4;
+  const nominal = beats * period;
+  const win = Math.round(4 / hopSec);
+  const slice = (start) => {
+    const out = new Float32Array(win * (nBands + 1));
+    for (let i = 0; i < win; i++) {
+      const f = Math.round(start) + i;
+      for (let b = 0; b < nBands; b++) out[i * (nBands + 1) + b] = bands[f * nBands + b];
+      out[i * (nBands + 1) + nBands] = flux[f] * 4;
+    }
+    return out;
+  };
+  // Lyria sometimes inserts a full stop (digital silence for about a beat) mid-groove; under a menu that
+  // sounds like a glitch every loop, so windows containing one are rejected.
+  const dropFrames = Math.round(0.1 / hopSec);
+  const hasDropout = (from, to) => {
+    let run = 0;
+    for (let f = Math.floor(from); f < Math.min(to, frames); f++) {
+      run = level[f] < median - 30 ? run + 1 : 0;
+      if (run >= dropFrames) return true;
+    }
+    return false;
+  };
+  let pick = null;
+  for (let start = t0 + phase + downbeat * period; start + nominal + win + 10 < usableEnd; start += 4 * period) {
+    if (hasDropout(start, start + nominal + win)) continue;
+    const head = slice(start);
+    const scores = [];
+    for (let d = -40; d <= 40; d++) scores.push(pearson(head, slice(start + nominal + d)));
+    const i = scores.indexOf(Math.max(...scores));
+    const refined = i > 0 && i < scores.length - 1 ? parabolic(scores[i - 1], scores[i], scores[i + 1]) : 0;
+    const candidate = { start, length: nominal + (i - 40) + refined, score: scores[i] };
+    if (!pick || candidate.score > pick.score) pick = candidate;
+  }
+  if (!pick) throw new LoopError(`no dropout-free ${asset.bars}-bar window between ${MUSIC_SKIP_SEC}s and ${(usableEnd * hopSec).toFixed(1)}s`);
+  return {
+    // The seam sits one crossfade before the downbeat, so the crossfade is over by the time the beat hits.
+    startSec: pick.start * hopSec + offsetSec - MUSIC_XFADE_SEC,
+    lengthSec: pick.length * hopSec,
+    score: pick.score,
+    measuredBpm: (60 * beats) / (pick.length * hopSec),
+    gridBpm: 60 / (period * hopSec),
+    changeByBeat,
+    usableEndSec: usableEnd * hopSec,
+  };
+}
+
+class LoopError extends Error {}
+
+function postProcessMusic(asset, rawPath, outPath) {
+  const sr = sampleRate(rawPath);
+  const loop = findLoop(spectralFeatures(decode(rawPath), sr), asset);
+  const outRate = 44100;
+  const n = Math.round((loopMs(asset) / 1000) * outRate);
+  const pad = Math.round((MUSIC_PAD_MS / 1000) * outRate);
+  const xfade = Math.round(MUSIC_XFADE_SEC * outRate);
+
+  // Varispeed (resample) the measured loop so it lasts exactly bars at asset.bpm. ffmpeg here has no
+  // rubberband, and atempo's WSOLA smears drum transients; varispeed only shifts pitch by the same tiny ratio.
+  const stretched = path.join(rawDir, `${asset.id}.stretched.f32`);
+  const rate = (sr * loop.lengthSec) / (loopMs(asset) / 1000);
+  ffmpeg([
+    '-i', rawPath,
+    '-af', `atrim=start=${loop.startSec.toFixed(6)}:end=${(loop.startSec + loop.lengthSec + 0.2).toFixed(6)},asetpts=PTS-STARTPTS,asetrate=${rate.toFixed(4)},aresample=${outRate}`,
+    '-ac', '2', '-f', 'f32le', stretched,
+  ]);
+  const raw = fs.readFileSync(stretched);
+  fs.rmSync(stretched, { force: true });
+  const y = new Float32Array(raw.buffer, raw.byteOffset, raw.length / 4);
+  if (y.length / 2 < n + xfade) throw new Error('stretched audio shorter than loop + crossfade');
+
+  // Equal-power crossfade into the head from the audio that follows the loop end, so the sample after
+  // the loop's last one is its true continuation: the seam needs no fade at either end.
+  const body = new Float32Array(n * 2);
+  for (let i = 0; i < n; i++) {
+    for (let c = 0; c < 2; c++) {
+      if (i < xfade) {
+        const th = (Math.PI / 2) * (i / xfade);
+        body[i * 2 + c] = y[i * 2 + c] * Math.sin(th) + y[(n + i) * 2 + c] * Math.cos(th);
+      } else body[i * 2 + c] = y[i * 2 + c];
+    }
+  }
+  const file = new Float32Array((n + 2 * pad) * 2);
+  file.set(body.subarray((n - pad) * 2), 0);
+  file.set(body, pad * 2);
+  file.set(body.subarray(0, pad * 2), (n + pad) * 2);
+
+  const work = path.join(rawDir, `${asset.id}.work.wav`);
+  const workRaw = path.join(rawDir, `${asset.id}.work.f32`);
+  fs.writeFileSync(workRaw, Buffer.from(file.buffer));
+  ffmpeg(['-f', 'f32le', '-ar', String(outRate), '-ac', '2', '-i', workRaw, '-c:a', 'pcm_f32le', work]);
+  fs.rmSync(workRaw, { force: true });
+
+  const { lufs } = measureLoudness(work);
+  const target = TARGET_LUFS.music + (asset.gainDb ?? 0);
+  let gain = Math.min(target - lufs, PEAK_CEILING_DB - peakDb(decode(work, 2)));
+  let samples;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    ffmpeg(['-i', work, '-af', `volume=${gain.toFixed(2)}dB`, '-c:a', 'libmp3lame', '-b:a', '192k', '-ar', String(outRate), outPath]);
+    samples = decode(outPath, 2);
+    const overshoot = peakDb(samples) - PEAK_CEILING_DB;
+    if (overshoot <= 0) break;
+    gain -= overshoot + 0.1;
+  }
+  fs.rmSync(work, { force: true });
+  return { loop, lufs, target, gain, peak: peakDb(samples), checks: checkLoop(samples, pad, n) };
+}
+
+// Seam diagnostics on the decoded MP3 (stereo interleaved): loop points must see identical audio,
+// the jump across the seam must look like any other sample step, and head/tail levels must match (no fades).
+function checkLoop(samples, start, n) {
+  const ch = 2;
+  const at = (i, c) => samples[i * ch + c];
+  const rms = (from, len) => {
+    let s = 0;
+    for (let i = from; i < from + len; i++) for (let c = 0; c < ch; c++) s += at(i, c) ** 2;
+    return 10 * Math.log10(s / (len * ch) + 1e-12);
+  };
+  const w50 = Math.round(0.05 * 44100);
+  // Audio after loopEnd is the periodic extension of audio after loopStart: their difference is codec noise only.
+  let sig = 0;
+  let diff = 0;
+  for (let i = 0; i < w50; i++) {
+    for (let c = 0; c < ch; c++) {
+      sig += at(start + i, c) ** 2;
+      diff += (at(start + n + i, c) - at(start + i, c)) ** 2;
+    }
+  }
+  const steps = [];
+  for (let i = start + 1; i < start + n; i++) steps.push(Math.abs(at(i, 0) - at(i - 1, 0)));
+  steps.sort((a, b) => a - b);
+  const seamStep = Math.max(...[0, 1].map((c) => Math.abs(at(start, c) - at(start + n - 1, c))));
+  return {
+    headRmsDb: rms(start, w50),
+    tailRmsDb: rms(start + n - w50, w50),
+    periodicSnrDb: 10 * Math.log10(sig / (diff + 1e-12)),
+    seamStep,
+    p99Step: steps[Math.floor(steps.length * 0.99)],
+    maxStep: steps[steps.length - 1],
+  };
+}
+
 async function main() {
   if (typeof fetch !== 'function') throw new Error('Node 20+ required (global fetch)');
   const { force, reprocess, only } = parseArgs(process.argv.slice(2));
@@ -235,19 +564,39 @@ async function main() {
     if (only) return only.includes(a.id);
     return force || reprocess || !fs.existsSync(path.join(outDir, `${a.id}.mp3`));
   });
-  if (targets.some((a) => !reprocess || !fs.existsSync(path.join(rawDir, `${a.id}.mp3`))) && !process.env.ELEVENLABS_API_KEY) {
-    throw new Error('ELEVENLABS_API_KEY is not set');
-  }
+  const needsApi = targets.filter((a) => !reprocess || !fs.existsSync(rawFile(a)));
+  if (needsApi.some((a) => a.kind !== 'music') && !process.env.ELEVENLABS_API_KEY) throw new Error('ELEVENLABS_API_KEY is not set');
+  if (needsApi.some((a) => a.kind === 'music') && !process.env.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY is not set');
 
   for (const asset of targets) {
-    const rawPath = path.join(rawDir, `${asset.id}.mp3`);
+    const rawPath = rawFile(asset);
     const outPath = path.join(outDir, `${asset.id}.mp3`);
-    if (!(reprocess && fs.existsSync(rawPath))) {
-      fs.writeFileSync(rawPath, await generate(asset));
-    }
+    const fresh = !(reprocess && fs.existsSync(rawPath));
+    if (fresh) fs.writeFileSync(rawPath, await generate(asset));
     if (!canProcess) {
       fs.copyFileSync(rawPath, outPath);
       console.log(`${asset.id}: raw (unprocessed)`);
+      continue;
+    }
+    if (asset.kind === 'music') {
+      // Generations are not always loopable (see findLoop); retry fresh ones a few times before giving up.
+      let result;
+      for (let attempt = 1; !result; attempt++) {
+        try {
+          result = postProcessMusic(asset, rawPath, outPath);
+        } catch (e) {
+          if (!(e instanceof LoopError) || !fresh || attempt >= 3) throw e;
+          console.log(`${asset.id}: attempt ${attempt} rejected (${e.message}), regenerating`);
+          fs.writeFileSync(rawPath, await generate(asset));
+        }
+      }
+      const { loop, lufs, gain, peak, checks } = result;
+      console.log(
+        `${asset.id}: ${durationMs(outPath)} ms, loop src ${loop.startSec.toFixed(3)}s +${loop.lengthSec.toFixed(4)}s ` +
+          `(measured ${loop.measuredBpm.toFixed(3)} BPM, grid ${loop.gridBpm.toFixed(2)}, seam match r=${loop.score.toFixed(3)}, ` +
+          `spectral change by beat ${loop.changeByBeat.map((k) => k.toFixed(3)).join('/')}, usable until ${loop.usableEndSec.toFixed(1)}s), ` +
+          `${lufs.toFixed(1)} LUFS → gain ${gain.toFixed(1)} dB, peak ${peak.toFixed(1)} dB\n  checks ${JSON.stringify(checks)}`,
+      );
       continue;
     }
     const r = postProcess(asset, rawPath, outPath);
@@ -257,10 +606,17 @@ async function main() {
     );
   }
 
+  const previousManifest = fs.existsSync(manifestPath) ? JSON.parse(fs.readFileSync(manifestPath, 'utf8')) : null;
   const assets = Object.fromEntries(
     ASSETS.filter((a) => fs.existsSync(path.join(outDir, `${a.id}.mp3`))).map((a) => {
       const file = `${a.id}.mp3`;
-      return [a.id, { file, kind: a.kind, durationMs: canProcess ? durationMs(path.join(outDir, file)) : null }];
+      const entry = { file, kind: a.kind, durationMs: canProcess ? durationMs(path.join(outDir, file)) : null };
+      // Loop points are fixed by construction (periodic padding of MUSIC_PAD_MS around an exact loop).
+      if (a.kind === 'music') Object.assign(entry, { bpm: a.bpm, loopStartMs: MUSIC_PAD_MS, loopEndMs: MUSIC_PAD_MS + loopMs(a) });
+      // Where the beat grid sits in the file is measured per generation (see report): keep the stored value
+      const beatOffsetMs = previousManifest?.assets?.[a.id]?.beatOffsetMs;
+      if (a.kind === 'music' && beatOffsetMs !== undefined) entry.beatOffsetMs = beatOffsetMs;
+      return [a.id, entry];
     }),
   );
   fs.writeFileSync(manifestPath, JSON.stringify({ version: 1, voiceId: VOICE_ID, assets }, null, 2) + '\n');

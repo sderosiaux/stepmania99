@@ -171,6 +171,15 @@
       "file": "vo-welcome.mp3",
       "kind": "voice",
       "durationMs": 2133
+    },
+    "music-menu": {
+      "file": "music-menu.mp3",
+      "kind": "music",
+      "durationMs": 64200,
+      "bpm": 120,
+      "loopStartMs": 100,
+      "loopEndMs": 64100,
+      "beatOffsetMs": 140
     }
   }
 }

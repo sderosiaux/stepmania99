@@ -178,3 +178,14 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(-
   padding: 0.7rem 1.2rem; border-radius: 10px; background: var(--glass-strong); border: 1px solid var(--accent-danger);
   color: var(--text-primary); font-weight: 600; letter-spacing: 0.04em; animation: fadein 0.2s;
 }
+
+/* Title screen reached through a shared song link */
+.title-linked { display: grid; justify-items: center; gap: 0.6rem; text-align: center; padding: 0 2rem; }
+.title-linked-pack { font: 600 0.85rem var(--font-ui); letter-spacing: 0.4em; text-transform: uppercase; color: var(--accent-cyan); }
+.title-linked-song { font: 700 clamp(2.4rem, 6vw, 5rem)/1.05 var(--font-ui); text-shadow: 0 6px 40px rgba(0, 0, 0, 0.7); }
+.title-linked-artist { font-size: 1.2rem; color: var(--text-secondary); }
+.title-linked-artist b { font: 800 0.9rem var(--font-display); letter-spacing: 0.12em; padding: 0.25em 0.6em; border-radius: 6px; background: var(--diff-medium); color: #120a20; margin-left: 0.4rem; }
+.title-linked-artist b[data-diff='Beginner'] { background: var(--diff-beginner); }
+.title-linked-artist b[data-diff='Easy'] { background: var(--diff-easy); }
+.title-linked-artist b[data-diff='Hard'] { background: var(--diff-hard); }
+.title-linked-artist b[data-diff='Challenge'] { background: var(--diff-challenge); }
