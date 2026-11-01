@@ -57,6 +57,7 @@ export class Hud {
     this.root.innerHTML = `
       <div class="hud-top">
         <div class="hud-life"><div class="hud-life-fill"></div><div class="hud-life-glint"></div><span class="hud-life-label">LIFE</span></div>
+        <div class="hud-meter"><div class="hud-meter-fill"></div><span class="hud-time"></span></div>
       </div>
       <aside class="hud-left">
         <div class="hud-song">
@@ -86,7 +87,6 @@ export class Hud {
         <div class="hud-combo"><span class="hud-combo-num"></span><span class="hud-combo-label">COMBO</span></div>
         <canvas class="hud-error" width="360" height="28"></canvas>
       </div>
-      <div class="hud-progress"><div class="hud-progress-fill"></div><span class="hud-time"></span></div>
       <div class="hud-banner-msg"></div>
       <div class="hud-badge hidden"></div>
       <div class="hud-keys hidden"></div>
@@ -110,7 +110,7 @@ export class Hud {
       fastslow: q('.hud-fastslow'),
       combo: q('.hud-combo'),
       comboNum: q('.hud-combo-num'),
-      progressFill: q('.hud-progress-fill'),
+      progressFill: q('.hud-meter-fill'),
       time: q('.hud-time'),
       message: q('.hud-banner-msg'),
       badge: q('.hud-badge'),

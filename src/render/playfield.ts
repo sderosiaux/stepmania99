@@ -198,8 +198,10 @@ void main() {
   vec3 hot = mix(tint, vec3(1.0), 0.55);
   // Same glow on every lane: at equal values, magenta (luminance ~0.4) stays under the bloom threshold
   // where cyan and green (~0.8) bloom. Lines and halos are lifted to a common luminance; the glass is not.
-  float gain = clamp(0.8 / max(dot(tint, vec3(0.2126, 0.7152, 0.0722)), 0.05), 1.0, 2.2);
-  float glow = (1.0 + 0.5 * uPulse + 0.9 * uFlash) * gain;
+  float gain = clamp(0.55 / max(dot(tint, vec3(0.2126, 0.7152, 0.0722)), 0.05), 1.0, 1.8);
+  // At rest the lines sit just under the bloom threshold (bright, not blinding); the beat and hits push them over.
+  // The gain evens out the resting glow only: on a hit every lane flashes alike, else magenta would blow out to white
+  float glow = gain * (1.0 + 0.35 * uPulse) + 0.9 * uFlash;
   vec3 col;
   float alpha;
 
@@ -208,7 +210,7 @@ void main() {
     float d = sdArrow(p) - 0.05;
     float line = band(d, 0.028);
     float inside = insideOf(d);
-    col = tint * (line * 0.95 + exp(-abs(d) * 24.0) * 0.22) * glow + hot * band(d, 0.01) * 0.55 * glow + tint * inside * (0.04 + 0.45 * uPress);
+    col = tint * (line * 0.62 + exp(-abs(d) * 30.0) * 0.08) * glow + hot * band(d, 0.01) * 0.25 * glow + tint * inside * (0.04 + 0.45 * uPress);
     alpha = max(inside * 0.6, line);
   } else {
     // Hologram: scanlined glass, chromatic fringe on the edge, a faint flicker
@@ -217,7 +219,7 @@ void main() {
     float scan = 0.55 + 0.45 * sin(p.y * 110.0 - uTime * 6.0);
     float flicker = 0.93 + 0.07 * sin(uTime * 53.0) * sin(uTime * 7.3);
     vec3 fringe = vec3(band(d - 0.012, 0.016), band(d, 0.016), band(d + 0.012, 0.016));
-    col = fringe * mix(vec3(1.0), tint, 0.5) * 0.9 * glow + tint * exp(-abs(d) * 26.0) * 0.12 * glow + tint * inside * (0.04 + 0.07 * scan + 0.4 * uPress) * flicker;
+    col = fringe * mix(vec3(1.0), tint, 0.5) * 0.6 * glow + tint * exp(-abs(d) * 30.0) * 0.05 * glow + tint * inside * (0.04 + 0.07 * scan + 0.4 * uPress) * flicker;
     alpha = max(inside * 0.5, max(fringe.r, max(fringe.g, fringe.b)));
   }
   gl_FragColor = vec4(col, alpha);
