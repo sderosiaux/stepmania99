@@ -258,6 +258,8 @@ export interface ResultsData {
   lifeHistory: { time: number; life: number }[];
   directionStats: Record<Direction, DirectionStats>;
   autoplay: boolean;
+  /** Arrows the No hands option took out: the chart was easier, so not a record */
+  handsRemoved: number;
 }
 
 // ============================================================================
@@ -265,6 +267,14 @@ export interface ResultsData {
 // ============================================================================
 
 export type Perspective = 'flat' | 'tilted';
+
+/** Receptor looks, both neon like the hold bodies (solid arrows, double line and chevron were tried and dropped) */
+export const RECEPTOR_STYLES = ['tube', 'hologram'] as const;
+export type ReceptorStyle = (typeof RECEPTOR_STYLES)[number];
+export const RECEPTOR_STYLE_LABELS: Record<ReceptorStyle, string> = {
+  tube: 'Neon tube',
+  hologram: 'Hologram',
+};
 
 export interface Settings {
   /** Global offset in ms: + means you hear the music later than the game assumes */
@@ -283,6 +293,9 @@ export interface Settings {
   showHitMs: boolean;
   /** No bloom, bursts, particles or glows: only notes and receptors */
   focus: boolean;
+  receptorStyle: ReceptorStyle;
+  /** Hands (3–4 arrows at once) become jumps; battles keep the chart as it is */
+  noHands: boolean;
 }
 
 export const RATE_OPTIONS = [0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1, 1.05, 1.1, 1.2, 1.3, 1.5] as const;
@@ -301,4 +314,6 @@ export const DEFAULT_SETTINGS: Settings = {
   rate: 1,
   showHitMs: false,
   focus: false,
+  receptorStyle: 'tube',
+  noHands: false,
 };

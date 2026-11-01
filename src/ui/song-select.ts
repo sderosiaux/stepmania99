@@ -1,5 +1,5 @@
 import type { Song, Chart, Settings, Difficulty } from '../types';
-import { CMOD_OPTIONS, RATE_OPTIONS } from '../types';
+import { CMOD_OPTIONS, RATE_OPTIONS, RECEPTOR_STYLES, RECEPTOR_STYLE_LABELS } from '../types';
 import type { HostNavigationState } from '../types/multiplayer';
 import { closestChart, type SongEntry, type ChartMeta } from '../core/manifest';
 import { loadSong, songDir, assetUrl } from '../core/loader';
@@ -41,7 +41,7 @@ const ERROR_COLORS: Record<string, string> = {
   mine: THEME.mine,
 };
 
-type OptionKind = 'speed' | 'offset' | 'perspective' | 'assist' | 'rate' | 'hitms' | 'focus';
+type OptionKind = 'speed' | 'offset' | 'perspective' | 'assist' | 'rate' | 'hitms' | 'focus' | 'receptors' | 'nohands';
 
 export class SongSelectScreen {
   private readonly root: HTMLElement;
@@ -254,6 +254,12 @@ export class SongSelectScreen {
       case 'KeyV':
         this.option('focus', 1);
         break;
+      case 'KeyR':
+        this.option('receptors', e.shiftKey ? -1 : 1);
+        break;
+      case 'KeyN':
+        if (solo) this.option('nohands', 1);
+        break;
       case 'KeyC':
         if (solo) this.cb.onCalibrate();
         break;
@@ -361,6 +367,11 @@ export class SongSelectScreen {
     else if (kind === 'perspective') s.perspective = s.perspective === 'flat' ? 'tilted' : 'flat';
     else if (kind === 'assist') s.assistTick = !s.assistTick;
     else if (kind === 'hitms') s.showHitMs = !s.showHitMs;
+    else if (kind === 'nohands') s.noHands = !s.noHands;
+    else if (kind === 'receptors') {
+      const n = RECEPTOR_STYLES.length;
+      s.receptorStyle = RECEPTOR_STYLES[(RECEPTOR_STYLES.indexOf(s.receptorStyle) + dir + n) % n]!;
+    }
     else s.focus = !s.focus;
     this.settings = s;
     audio.play1('ui-change', { gain: 0.7 });
@@ -792,6 +803,8 @@ export class SongSelectScreen {
       <button class="opt" data-opt="perspective"><span class="opt-k"><kbd>P</kbd></span><span class="opt-l">View</span><b>${s.perspective === 'flat' ? 'Classic' : 'Highway'}</b></button>
       <button class="opt" data-opt="assist"><span class="opt-k"><kbd>T</kbd></span><span class="opt-l">Assist tick</span><b>${s.assistTick ? 'On' : 'Off'}</b></button>
       <button class="opt" data-opt="focus"><span class="opt-k"><kbd>V</kbd></span><span class="opt-l">Effects</span><b>${s.focus ? 'Focus' : 'Full'}</b></button>
+      <button class="opt ${s.noHands ? 'warn' : ''}" data-opt="nohands" ${inRoom ? 'disabled' : ''} title="3 or 4 arrows at once become jumps; runs don't set records"><span class="opt-k"><kbd>N</kbd></span><span class="opt-l">No hands</span><b>${s.noHands ? 'On' : 'Off'}</b></button>
+      <button class="opt" data-opt="receptors"><span class="opt-k"><kbd>R</kbd></span><span class="opt-l">Receptors</span><b>${RECEPTOR_STYLE_LABELS[s.receptorStyle]}</b></button>
       <button class="opt" data-opt="hitms"><span class="opt-k"><kbd>H</kbd></span><span class="opt-l">Hit ms</span><b>${s.showHitMs ? 'Every hit' : 'Off'}</b></button>
       <div class="opt-hints"><span><kbd>↑</kbd><kbd>↓</kbd> song</span><span><kbd>←</kbd><kbd>→</kbd> difficulty</span><span><kbd>PgUp</kbd><kbd>PgDn</kbd> pack</span><span><kbd>/</kbd> search</span></div>`;
     el.querySelectorAll<HTMLElement>('[data-opt]').forEach((b) =>

@@ -337,7 +337,7 @@ class App {
     document.body.classList.remove('in-game');
     this.screen = 'results';
     if (!r.autoplay) saveLastRunErrors(r.song.id, r.chart.difficulty, r.errors);
-    const record = r.autoplay || r.failed || r.rate !== 1
+    const record = r.autoplay || r.failed || r.rate !== 1 || r.handsRemoved > 0
       ? false
       : submitScore(r.song.id, r.chart.difficulty, {
           grade: r.grade,

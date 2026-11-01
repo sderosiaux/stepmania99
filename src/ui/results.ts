@@ -79,7 +79,7 @@ export class ResultsScreen {
             <div class="res-artist">${escapeHtml(r.song.artist)}</div>
           </div>
           <div class="res-chart" data-diff="${r.chart.difficulty}">${r.chart.difficulty.toUpperCase()} <b>${r.chart.level}</b></div>
-          ${r.autoplay ? '<div class="res-auto">AUTOPLAY · not saved</div>' : r.rate !== 1 ? `<div class="res-auto">RATE ${r.rate}× · not saved</div>` : ''}
+          ${r.autoplay ? '<div class="res-auto">AUTOPLAY · not saved</div>' : r.rate !== 1 ? `<div class="res-auto">RATE ${r.rate}× · not saved</div>` : r.handsRemoved ? '<div class="res-auto">NO HANDS · not saved</div>' : ''}
         </header>
         <section class="res-main">
           <div class="res-grade-wrap">

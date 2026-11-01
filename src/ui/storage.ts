@@ -1,5 +1,5 @@
 import type { Settings, LetterGrade, ErrorMark } from '../types';
-import { DEFAULT_SETTINGS } from '../types';
+import { DEFAULT_SETTINGS, RECEPTOR_STYLES } from '../types';
 
 // ============================================================================
 // localStorage persistence: settings and personal bests.
@@ -17,6 +17,8 @@ export function loadSettings(): Settings {
     for (const k of Object.keys(DEFAULT_SETTINGS) as (keyof Settings)[]) {
       if (raw[k] !== undefined && typeof raw[k] === typeof DEFAULT_SETTINGS[k]) (s as unknown as Record<string, unknown>)[k] = raw[k];
     }
+    // Saved by another build: a style that no longer exists
+    if (!RECEPTOR_STYLES.includes(s.receptorStyle)) s.receptorStyle = DEFAULT_SETTINGS.receptorStyle;
     return s;
   } catch {
     return { ...DEFAULT_SETTINGS };

@@ -2,6 +2,7 @@ import type { Song, Chart, Note, Settings, ResultsData, Direction, DirectionStat
 import { DIRECTIONS } from '../types';
 import { audio, type SfxId } from '../audio';
 import { assetUrl } from './loader';
+import { removeHands } from './modifiers';
 import { input } from '../input';
 import type { Stage } from '../render/stage';
 import type { Hud } from '../render/hud';
@@ -78,6 +79,7 @@ export class GameController {
   private resumeAt = 0;
   private countdownShown = 0;
   private loop = 1;
+  private handsRemoved = 0;
 
   private auto: SyntheticInput[] = [];
   private autoIdx = 0;
@@ -116,7 +118,10 @@ export class GameController {
     this.rate = opts.multiplayer ? 1 : this.settings.rate;
     this.timing = buildTimingData(chart.timing);
     const p = opts.practice;
-    this.notes = p ? chart.notes.filter((n) => n.time >= p.from && n.time <= p.to) : chart.notes;
+    // Every battle player gets the same chart
+    const playable = this.settings.noHands && !opts.multiplayer ? removeHands(chart.notes) : chart.notes;
+    this.handsRemoved = chart.notes.length - playable.length;
+    this.notes = p ? playable.filter((n) => n.time >= p.from && n.time <= p.to) : playable;
     this.jumpRows = rowsWithJumps(this.notes);
     this.loop = 1;
     this.failed = false;
@@ -151,10 +156,13 @@ export class GameController {
 
     // Visuals
     this.stage.setPerspective(this.settings.perspective);
+    this.stage.playfield.setReceptorStyle(this.settings.receptorStyle);
     this.stage.setFocus(this.settings.focus);
     this.hud.setFocus(this.settings.focus);
     this.stage.background.setImage(assetUrl(song.basePath, song.background));
-    const badge = [p ? 'PRACTICE' : opts.jukebox ? 'JUKEBOX' : opts.autoplay ? 'AUTOPLAY' : '', this.rate !== 1 ? `${this.rate}×` : ''].filter(Boolean).join(' · ');
+    const badge = [p ? 'PRACTICE' : opts.jukebox ? 'JUKEBOX' : opts.autoplay ? 'AUTOPLAY' : '', this.rate !== 1 ? `${this.rate}×` : '', this.handsRemoved ? 'NO HANDS' : '']
+      .filter(Boolean)
+      .join(' · ');
     this.hud.show(song, chart, badge);
     const [l, r] = this.stage.laneScreenSpan();
     this.hud.layout(this.stage.receptorScreenY(), [l, r], this.settings.perspective === 'tilted');
@@ -622,6 +630,7 @@ export class GameController {
       lifeHistory: this.lifeHistory,
       directionStats,
       autoplay: this.opts.autoplay,
+      handsRemoved: this.handsRemoved,
     };
   }
 }

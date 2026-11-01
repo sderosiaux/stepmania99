@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import type { Note, JudgmentGrade, Perspective } from '../types';
+import type { Note, JudgmentGrade, Perspective, ReceptorStyle } from '../types';
+import { RECEPTOR_STYLES } from '../types';
 import type { NoteRuntime } from '../core/judge';
 import { THEME } from './theme';
 
@@ -21,22 +22,24 @@ const MAX_NOTES = 512;
 const MAX_HOLDS = 48;
 const MAX_PARTICLES = 2400;
 
+/** Arrow outline, pointing up, in a unit box */
+const ARROW_POINTS: [number, number][] = [
+  [0, 0.5],
+  [0.5, 0.02],
+  [0.5, -0.16],
+  [0.36, -0.16],
+  [0.15, 0.05],
+  [0.15, -0.5],
+  [-0.15, -0.5],
+  [-0.15, 0.05],
+  [-0.36, -0.16],
+  [-0.5, -0.16],
+  [-0.5, 0.02],
+];
+
 function arrowShape(scale = 1): THREE.Shape {
-  const pts: [number, number][] = [
-    [0, 0.5],
-    [0.5, 0.02],
-    [0.5, -0.16],
-    [0.36, -0.16],
-    [0.15, 0.05],
-    [0.15, -0.5],
-    [-0.15, -0.5],
-    [-0.15, 0.05],
-    [-0.36, -0.16],
-    [-0.5, -0.16],
-    [-0.5, 0.02],
-  ];
   const s = new THREE.Shape();
-  pts.forEach(([x, y], i) => (i === 0 ? s.moveTo(x * scale, y * scale) : s.lineTo(x * scale, y * scale)));
+  ARROW_POINTS.forEach(([x, y], i) => (i === 0 ? s.moveTo(x * scale, y * scale) : s.lineTo(x * scale, y * scale)));
   s.closePath();
   return s;
 }
@@ -53,12 +56,6 @@ function arrowGeometry(): THREE.BufferGeometry {
   g.translate(0, 0, -0.05);
   g.computeVertexNormals();
   return g;
-}
-
-function arrowOutline(inner: number): THREE.BufferGeometry {
-  const outer = arrowShape(0.98);
-  outer.holes.push(new THREE.Path(arrowShape(inner).getPoints().reverse()));
-  return new THREE.ShapeGeometry(outer);
 }
 
 const noteVertex = /* glsl */ `
@@ -146,6 +143,84 @@ void main() {
   col *= 0.75 + uActive * 0.35;
   col = mix(col, vec3(0.16, 0.16, 0.24) * (0.6 + 0.4 * edge), uDead);
   gl_FragColor = vec4(col, 0.92);
+}
+`;
+
+/** Receptor quad side, in lane units: room for the glow around a ~1-unit arrow */
+const RECEPTOR_QUAD = 1.7;
+
+/**
+ * Neon receptors, drawn from the arrow's signed distance field: strokes of any width stay crisp, and
+ * glow is a falloff of the same distance. Colors go above 1 so the bloom picks the lines up, like the
+ * hold bodies' edges. Premultiplied output: alpha darkens what is behind (glass), color adds (glow).
+ */
+const receptorFragment = /* glsl */ `
+varying vec2 vUv;
+uniform vec2 uPoly[${ARROW_POINTS.length}];
+uniform vec3 uColor;
+uniform vec3 uFlashColor;
+uniform float uFlash;
+uniform float uPress;
+uniform float uPulse;
+uniform float uTime;
+/** Index in RECEPTOR_STYLES: 0 tube, 1 hologram */
+uniform float uStyle;
+
+float sdArrow(vec2 p) {
+  float d = dot(p - uPoly[0], p - uPoly[0]);
+  float s = 1.0;
+  int j = ${ARROW_POINTS.length - 1};
+  for (int i = 0; i < ${ARROW_POINTS.length}; i++) {
+    vec2 e = uPoly[j] - uPoly[i];
+    vec2 w = p - uPoly[i];
+    vec2 b = w - e * clamp(dot(w, e) / dot(e, e), 0.0, 1.0);
+    d = min(d, dot(b, b));
+    bvec3 c = bvec3(p.y >= uPoly[i].y, p.y < uPoly[j].y, e.x * w.y > e.y * w.x);
+    if (all(c) || all(not(c))) s = -s;
+    j = i;
+  }
+  return s * sqrt(d);
+}
+
+/** Anti-aliased band of half-width w around distance 0 */
+float band(float d, float w) {
+  float aa = fwidth(d);
+  return 1.0 - smoothstep(w - aa, w + aa, abs(d));
+}
+
+float insideOf(float d) {
+  return 1.0 - smoothstep(0.0, fwidth(d), d);
+}
+
+void main() {
+  vec2 p = (vUv - 0.5) * ${RECEPTOR_QUAD.toFixed(2)};
+  vec3 tint = mix(uColor, uFlashColor, uFlash);
+  vec3 hot = mix(tint, vec3(1.0), 0.55);
+  // Same glow on every lane: at equal values, magenta (luminance ~0.4) stays under the bloom threshold
+  // where cyan and green (~0.8) bloom. Lines and halos are lifted to a common luminance; the glass is not.
+  float gain = clamp(0.8 / max(dot(tint, vec3(0.2126, 0.7152, 0.0722)), 0.05), 1.0, 2.2);
+  float glow = (1.0 + 0.5 * uPulse + 0.9 * uFlash) * gain;
+  vec3 col;
+  float alpha;
+
+  if (uStyle < 0.5) {
+    // Neon tube: one thin line with a white-hot core and a halo, dark glass inside
+    float d = sdArrow(p) - 0.05;
+    float line = band(d, 0.028);
+    float inside = insideOf(d);
+    col = tint * (line * 0.95 + exp(-abs(d) * 24.0) * 0.22) * glow + hot * band(d, 0.01) * 0.55 * glow + tint * inside * (0.04 + 0.45 * uPress);
+    alpha = max(inside * 0.6, line);
+  } else {
+    // Hologram: scanlined glass, chromatic fringe on the edge, a faint flicker
+    float d = sdArrow(p) - 0.04;
+    float inside = insideOf(d);
+    float scan = 0.55 + 0.45 * sin(p.y * 110.0 - uTime * 6.0);
+    float flicker = 0.93 + 0.07 * sin(uTime * 53.0) * sin(uTime * 7.3);
+    vec3 fringe = vec3(band(d - 0.012, 0.016), band(d, 0.016), band(d + 0.012, 0.016));
+    col = fringe * mix(vec3(1.0), tint, 0.5) * 0.9 * glow + tint * exp(-abs(d) * 26.0) * 0.12 * glow + tint * inside * (0.04 + 0.07 * scan + 0.4 * uPress) * flicker;
+    alpha = max(inside * 0.5, max(fringe.r, max(fringe.g, fringe.b)));
+  }
+  gl_FragColor = vec4(col, alpha);
 }
 `;
 
@@ -271,7 +346,7 @@ export class Playfield {
   private readonly fade: THREE.InstancedBufferAttribute;
   private readonly mines: THREE.InstancedMesh;
 
-  private readonly receptors: { root: THREE.Group; ring: THREE.Mesh; ringMat: THREE.MeshBasicMaterial; fill: THREE.Mesh; fillMat: THREE.MeshBasicMaterial; press: number; flash: number; flashColor: THREE.Color }[] = [];
+  private readonly receptors: { root: THREE.Group; mat: THREE.ShaderMaterial; press: number; flash: number; flashColor: THREE.Color }[] = [];
   private readonly beams: { mesh: THREE.Mesh; mat: THREE.ShaderMaterial; level: number }[] = [];
   private readonly holdPool: HoldVisual[] = [];
   private readonly bursts: Burst[] = [];
@@ -323,21 +398,35 @@ export class Playfield {
     }
 
     // Receptors
-    const ringGeo = arrowOutline(0.7);
-    const fillGeo = new THREE.ShapeGeometry(arrowShape(0.72));
+    const receptorGeo = new THREE.PlaneGeometry(RECEPTOR_QUAD, RECEPTOR_QUAD);
+    // Outline the neon line rides on: the size of a note (0.86) plus a margin
+    const poly = ARROW_POINTS.map(([x, y]) => new THREE.Vector2(x * 0.88, y * 0.88));
     for (let i = 0; i < 4; i++) {
       const root = new THREE.Group();
       root.position.x = LANE_X[i]!;
       root.quaternion.copy(this.laneQ[i]!);
-      const ringMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, depthWrite: false });
-      const fillMat = new THREE.MeshBasicMaterial({ color: THEME.lane[i]!, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false });
-      const ring = new THREE.Mesh(ringGeo, ringMat);
-      const fill = new THREE.Mesh(fillGeo, fillMat);
-      const back = new THREE.Mesh(new THREE.ShapeGeometry(arrowShape(0.98)), new THREE.MeshBasicMaterial({ color: 0x07061a, transparent: true, opacity: 0.85, depthWrite: false }));
-      back.position.z = -0.02;
-      root.add(back, fill, ring);
+      const mat = new THREE.ShaderMaterial({
+        vertexShader: holdVertex,
+        fragmentShader: receptorFragment,
+        uniforms: {
+          uPoly: { value: poly },
+          uColor: { value: new THREE.Color(THEME.lane[i]!) },
+          uFlashColor: { value: new THREE.Color() },
+          uFlash: { value: 0 },
+          uPress: { value: 0 },
+          uPulse: { value: 0 },
+          uTime: { value: 0 },
+          uStyle: { value: 0 },
+        },
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.CustomBlending,
+        blendSrc: THREE.OneFactor,
+        blendDst: THREE.OneMinusSrcAlphaFactor,
+      });
+      root.add(new THREE.Mesh(receptorGeo, mat));
       this.group.add(root);
-      this.receptors.push({ root, ring, ringMat, fill, fillMat, press: 0, flash: 0, flashColor: new THREE.Color() });
+      this.receptors.push({ root, mat, press: 0, flash: 0, flashColor: new THREE.Color() });
     }
 
     // Notes (+ dark outline instanced behind)
@@ -445,6 +534,10 @@ export class Playfield {
       b.mesh.position.set(LANE_X[i]!, this.dir * 2.75, -0.05);
       b.mesh.rotation.z = p === 'flat' ? Math.PI : 0;
     }
+  }
+
+  setReceptorStyle(style: ReceptorStyle): void {
+    for (const r of this.receptors) r.mat.uniforms.uStyle!.value = RECEPTOR_STYLES.indexOf(style);
   }
 
   setFocus(on: boolean): void {
@@ -574,18 +667,13 @@ export class Playfield {
       r.flash *= Math.exp(-f.dt * 10);
       const s = 1 - 0.12 * r.press + 0.06 * pulse;
       r.root.scale.setScalar(s);
-      // HDR color: values above 1 feed the bloom on the beat and on hits
-      if (this.focus) {
-        // No glow, but the receptor still answers: lit on press, tinted by the judgment on a hit
-        r.ringMat.color.set(THEME.lane[i]!).lerp(r.flashColor, r.flash).multiplyScalar(0.75 + 0.25 * Math.max(r.press, r.flash));
-        r.fillMat.color.set(THEME.lane[i]!).lerp(r.flashColor, r.flash);
-        r.fillMat.opacity = Math.min(0.7, 0.35 * r.press + 0.6 * r.flash);
-      } else {
-        r.ringMat.color.set(THEME.lane[i]!).lerp(this.tmpC.set('#ffffff'), 0.2 + 0.3 * r.flash).multiplyScalar(0.7 + 0.5 * pulse + 0.4 * r.flash);
-        r.fillMat.color.set(THEME.lane[i]!);
-        r.fillMat.opacity = 0.4 * r.press + 0.3 * r.flash;
-      }
-      r.ringMat.opacity = 0.95;
+      // Focus mode: pulse is 0, so the lines stay steady; press and hits still answer
+      const u = r.mat.uniforms;
+      (u.uFlashColor!.value as THREE.Color).copy(r.flashColor);
+      u.uFlash!.value = r.flash;
+      u.uPress!.value = r.press;
+      u.uPulse!.value = pulse;
+      u.uTime!.value = f.time;
       const b = this.beams[i]!;
       b.level = this.focus ? 0 : held ? Math.max(b.level * Math.exp(-f.dt * 6), 0.18) : b.level * Math.exp(-f.dt * 9);
       b.mat.uniforms.uAlpha!.value = b.level * 0.45;
