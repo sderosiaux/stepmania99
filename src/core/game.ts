@@ -47,6 +47,8 @@ const CURVE_SAMPLES = 100;
 export interface GameOptions {
   autoplay: boolean;
   multiplayer: boolean;
+  /** Autoplay run in the jukebox: no announcer, no fanfare, straight on to the next song */
+  jukebox?: boolean;
   /** Loop a section of the chart (song ms), fail off, no record */
   practice?: { from: number; to: number };
   /** Pacemaker reference: personal-best loss curve, or null to pace against `paceTarget` */
@@ -152,7 +154,7 @@ export class GameController {
     this.stage.setFocus(this.settings.focus);
     this.hud.setFocus(this.settings.focus);
     this.stage.background.setImage(assetUrl(song.basePath, song.background));
-    const badge = [p ? 'PRACTICE' : opts.autoplay ? 'AUTOPLAY' : '', this.rate !== 1 ? `${this.rate}×` : ''].filter(Boolean).join(' · ');
+    const badge = [p ? 'PRACTICE' : opts.jukebox ? 'JUKEBOX' : opts.autoplay ? 'AUTOPLAY' : '', this.rate !== 1 ? `${this.rate}×` : ''].filter(Boolean).join(' · ');
     this.hud.show(song, chart, badge);
     const [l, r] = this.stage.laneScreenSpan();
     this.hud.layout(this.stage.receptorScreenY(), [l, r], this.settings.perspective === 'tilted');
@@ -161,11 +163,13 @@ export class GameController {
     const goAt = Math.max(this.startMs + 1300 * this.rate, first - 1500 * this.rate);
     this.cues = p
       ? [{ at: this.startMs + 200 * this.rate, run: () => this.hud.message(`LOOP ${this.loop}`, 'ready', 900) }]
-      : [
-          { at: this.startMs + 250 * this.rate, run: () => this.hud.message('READY?', 'ready', 1100) },
-          { at: goAt, run: () => this.hud.message('GO!', 'go', 800) },
-        ];
-    if (!p) {
+      : opts.jukebox
+        ? []
+        : [
+            { at: this.startMs + 250 * this.rate, run: () => this.hud.message('READY?', 'ready', 1100) },
+            { at: goAt, run: () => this.hud.message('GO!', 'go', 800) },
+          ];
+    if (!p && !opts.jukebox) {
       audio.loadSfx().then(() => {
         if (this.phase !== 'playing') return;
         audio.scheduleAt('vo-ready', this.startMs + 250 * this.rate);
@@ -439,9 +443,11 @@ export class GameController {
     if (combo <= prev || Math.floor(combo / 100) === Math.floor(prev / 100)) return;
     const VOICE: Record<number, SfxId> = { 100: 'vo-combo-100', 200: 'vo-combo-200', 500: 'vo-combo-500' };
     const hundred = Math.floor(combo / 100) * 100;
-    audio.play1('milestone', { gain: 0.6 });
-    const vo = VOICE[hundred];
-    if (vo) audio.play1(vo, { duck: true });
+    if (!this.opts.jukebox) {
+      audio.play1('milestone', { gain: 0.6 });
+      const vo = VOICE[hundred];
+      if (vo) audio.play1(vo, { duck: true });
+    }
     this.stage.playfield.fireworks(THEME.accent.gold, 120);
     this.stage.background.hit(THEME.accent.gold, 1.2);
   }
@@ -477,6 +483,11 @@ export class GameController {
     const done = this.judge.isComplete() && songNow >= this.lastNoteEnd() + 600 * this.rate;
     if (!done && songNow < this.endMs) return;
     this.phase = 'outro';
+    if (this.opts.jukebox) {
+      audio.fadeOut(1.6);
+      this.outroAt = performance.now() + 1800;
+      return;
+    }
     const tier = fullComboTier(this.score);
     if (tier) {
       const [label, vo]: [string, SfxId] =

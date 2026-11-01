@@ -90,3 +90,21 @@ export function getLastRunErrors(songId: string, difficulty: string): ErrorMark[
     return null;
   }
 }
+
+const FORGOTTEN_KEY = 'sm99.jukebox.forgotten.v1';
+
+/** Songs skipped in the jukebox as "not for me": it never picks them again */
+export function getForgotten(): Set<string> {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(FORGOTTEN_KEY) ?? '[]') as string[]);
+  } catch {
+    return new Set();
+  }
+}
+
+export function setForgotten(songId: string, forgotten: boolean): void {
+  const ids = getForgotten();
+  if (forgotten) ids.add(songId);
+  else ids.delete(songId);
+  localStorage.setItem(FORGOTTEN_KEY, JSON.stringify([...ids]));
+}

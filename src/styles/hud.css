@@ -116,6 +116,8 @@
 .hud-pace[data-side='behind'] b { color: var(--accent-danger); text-shadow: 0 0 10px rgba(255, 51, 85, 0.5); }
 .hud-fastslow[data-side='center'] { color: var(--judge-marvelous); }
 .hud-badge { position: absolute; left: 50%; bottom: 3.5vh; transform: translateX(-50%); font: 800 0.8rem var(--font-display); letter-spacing: 0.5em; color: var(--accent-gold); animation: blink 1.2s steps(2) infinite; }
+.hud-keys { position: absolute; left: 50%; bottom: 0.9vh; transform: translateX(-50%); display: flex; gap: 1.4rem; white-space: nowrap; font: 600 0.78rem var(--font-ui); color: var(--text-secondary); }
+.hud-keys kbd { margin-right: 0.35em; }
 
 /* Big messages */
 .hud-banner-msg { position: absolute; inset: 0; display: grid; place-items: center; }

@@ -16,7 +16,8 @@ import type { Difficulty, GameScreen, ResultsData, Settings } from './types';
 import { audio } from './audio';
 import { GameController } from './core/game';
 import { loadManifest, loadSong } from './core/loader';
-import type { SongEntry } from './core/manifest';
+import { closestChart, type SongEntry } from './core/manifest';
+import { Jukebox } from './core/jukebox';
 import { buildTimingData, type TimingData } from './core/timing-data';
 import { Stage } from './render/stage';
 import { Hud } from './render/hud';
@@ -25,13 +26,17 @@ import { SongSelectScreen } from './ui/song-select';
 import { ResultsScreen } from './ui/results';
 import { CalibrationScreen } from './ui/calibration';
 import { toast, escapeHtml } from './ui/dom';
-import { loadSettings, saveSettings, submitScore, getBest, saveLastRunErrors } from './ui/storage';
+import { loadSettings, saveSettings, submitScore, getBest, saveLastRunErrors, getForgotten, setForgotten } from './ui/storage';
 import { multiplayerClient, multiplayerGameManager, type MultiplayerEvent } from './multiplayer';
 
 // ============================================================================
 // App shell: one WebGL stage behind everything, DOM screens on top.
 // title → song select ⇄ gameplay → results, plus calibration.
 // ============================================================================
+
+const JUKEBOX_KEYS = '<span><kbd>←</kbd><kbd>→</kbd>Previous · Next</span><span><kbd>⌫</kbd>Not for me</span><span><kbd>U</kbd>Undo</span><span><kbd>Esc</kbd>Exit</span>';
+/** Songs in a row that fail to load before the jukebox gives up */
+const JUKEBOX_MAX_FAILURES = 5;
 
 class App {
   private readonly ui: HTMLElement;
@@ -48,6 +53,8 @@ class App {
   private last: { entry: SongEntry; difficulty: Difficulty; autoplay: boolean; practice?: { from: number; to: number } } | null = null;
   private multiplayer = false;
   private escArmedUntil = 0;
+  /** Set while the jukebox runs: `dropped` is this session's ⌫ history, for U */
+  private jukebox: { box: Jukebox; difficulty: Difficulty; dropped: SongEntry[]; failures: number } | null = null;
 
   // Menu backdrop clock
   private menuLast = performance.now();
@@ -63,6 +70,7 @@ class App {
       onPlay: (entry, difficulty, autoplay, practice) => void this.play(entry, difficulty, autoplay, false, practice),
       onCalibrate: () => this.showCalibration(),
       onSettings: (s) => this.updateSettings(s),
+      onJukebox: (entries, difficulty) => this.startJukebox(entries, difficulty),
     });
     this.results = new ResultsScreen(this.ui, {
       onContinue: () => this.showSelect(),
@@ -191,9 +199,10 @@ class App {
     this.multiplayer = multiplayer;
     this.last = practice ? { entry, difficulty, autoplay, practice } : { entry, difficulty, autoplay };
     document.body.classList.add('in-game');
+    this.hud.setKeys(this.jukebox ? JUKEBOX_KEYS : null);
     const game = new GameController(this.stage, this.hud, this.settings);
     this.game = game;
-    game.onFinish = (r) => this.showResults(r);
+    game.onFinish = (r) => (this.jukebox ? this.jukeboxPlay(this.jukebox.box.next()) : this.showResults(r));
     try {
       const song = await loadSong(entry);
       const chart = song.charts.find((c) => c.difficulty === difficulty) ?? song.charts[0]!;
@@ -202,16 +211,106 @@ class App {
       await game.start(song, chart, {
         autoplay,
         multiplayer,
+        jukebox: this.jukebox !== null,
         ...(practice ? { practice } : {}),
         paceCurve: best?.lossCurve ?? null,
         paceTarget: best ? { label: 'PB', percentage: best.percentage } : { label: 'AA', percentage: 93 },
       });
+      if (this.jukebox && this.game === game) this.jukebox.failures = 0;
     } catch (e) {
       console.error('Failed to start', e);
+      // Another song may have started meanwhile (a jukebox skip): it is not ours to tear down
+      if (this.game !== game) return;
       this.game = null;
       document.body.classList.remove('in-game');
+      if (this.jukebox && ++this.jukebox.failures < JUKEBOX_MAX_FAILURES) return this.jukeboxPlay(this.jukebox.box.next());
+      this.jukebox = null;
       this.showSelect();
     }
+  }
+
+  // --------------------------------------------------------------------------
+  // Jukebox: autoplay runs back to back; ⌫ drops a song for good (persisted)
+  // --------------------------------------------------------------------------
+
+  private startJukebox(entries: SongEntry[], difficulty: Difficulty): void {
+    this.jukebox = { box: new Jukebox(entries, getForgotten), difficulty, dropped: [], failures: 0 };
+    this.jukeboxPlay(this.jukebox.box.next());
+  }
+
+  private jukeboxPlay(entry: SongEntry | null): void {
+    const j = this.jukebox;
+    if (!j) return;
+    if (!entry) {
+      toast('Nothing left to play in this list: every song is skipped or has no audio', 4000);
+      this.exitJukebox();
+      return;
+    }
+    void this.play(entry, closestChart(entry, j.difficulty).difficulty, true);
+  }
+
+  /** ⌫: never pick this song again, on to the next */
+  private jukeboxDrop(): void {
+    const j = this.jukebox;
+    const cur = j?.box.current;
+    if (!j || !cur) return;
+    setForgotten(cur.id, true);
+    j.dropped.push(cur);
+    toast(`"${cur.title}" won't come back · U to undo`, 3000);
+    audio.play1('ui-back', { gain: 0.6 });
+    this.jukeboxPlay(j.box.next());
+  }
+
+  /** U: bring back the last song dropped and play it now */
+  private jukeboxUndo(): void {
+    const j = this.jukebox;
+    const back = j?.dropped.pop();
+    if (!j || !back) return;
+    setForgotten(back.id, false);
+    toast(`"${back.title}" is back in the jukebox`, 2200);
+    audio.play1('ui-select', { gain: 0.6 });
+    this.jukeboxPlay(j.box.playNow(back));
+  }
+
+  /** Jukebox controls; false for any other key (V, Enter on pause… keep working) */
+  private onJukeboxKey(code: string): boolean {
+    switch (code) {
+      case 'Backspace':
+      case 'Delete':
+        this.jukeboxDrop();
+        return true;
+      case 'ArrowRight':
+        this.jukeboxPlay(this.jukebox?.box.next() ?? null);
+        return true;
+      case 'ArrowLeft': {
+        // Already on the first song of the session: nothing to go back to
+        const prev = this.jukebox?.box.previous();
+        if (prev) this.jukeboxPlay(prev);
+        return true;
+      }
+      case 'KeyU':
+        this.jukeboxUndo();
+        return true;
+      case 'Escape':
+        this.exitJukebox();
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  /** Back to song select, on the song that was playing */
+  private exitJukebox(): void {
+    const j = this.jukebox;
+    this.jukebox = null;
+    this.hud.setKeys(null);
+    this.game?.stop();
+    this.game = null;
+    document.body.classList.remove('in-game');
+    audio.play1('ui-back');
+    this.showSelect();
+    const last = j?.box.current;
+    if (j && last) this.select.focusSong(last.id, j.difficulty);
   }
 
   private showResults(r: ResultsData): void {
@@ -259,6 +358,10 @@ class App {
 
   private onKey = (e: KeyboardEvent) => {
     if (this.screen !== 'gameplay' || !this.game || e.repeat) return;
+    if (this.jukebox && this.onJukeboxKey(e.code)) {
+      e.preventDefault();
+      return;
+    }
     if (e.code === 'KeyV') {
       e.preventDefault();
       this.updateSettings({ ...this.settings, focus: !this.settings.focus });

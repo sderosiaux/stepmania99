@@ -89,6 +89,7 @@ export class Hud {
       <div class="hud-progress"><div class="hud-progress-fill"></div><span class="hud-time"></span></div>
       <div class="hud-banner-msg"></div>
       <div class="hud-badge hidden"></div>
+      <div class="hud-keys hidden"></div>
     `;
     parent.appendChild(this.root);
     const q = (s: string) => this.root.querySelector(s) as HTMLElement;
@@ -113,6 +114,7 @@ export class Hud {
       time: q('.hud-time'),
       message: q('.hud-banner-msg'),
       badge: q('.hud-badge'),
+      keys: q('.hud-keys'),
       pace: q('.hud-pace'),
       paceLabel: q('.hud-pace-label'),
       paceDelta: q('.hud-pace-delta'),
@@ -150,6 +152,12 @@ export class Hud {
 
   hide(): void {
     this.root.classList.add('hidden');
+  }
+
+  /** Controls of the current mode (jukebox), kept across songs; null clears them */
+  setKeys(html: string | null): void {
+    this.el.keys!.innerHTML = html ?? '';
+    this.el.keys!.classList.toggle('hidden', !html);
   }
 
   setFocus(on: boolean): void {

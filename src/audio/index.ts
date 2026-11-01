@@ -27,6 +27,11 @@ interface SfxManifest {
 const MENU_MUSIC = 'music-menu';
 
 const SCHEDULE_MARGIN_S = 0.03;
+/**
+ * Decoded songs kept around (preview → play reuses the buffer). A decoded 3-minute song is ~60 MB of PCM:
+ * unbounded, browsing previews or a jukebox session grows memory by one song each time.
+ */
+const MUSIC_CACHE_SIZE = 4;
 /** -40 dBFS: first sample louder than this is the attack */
 const ONSET_THRESHOLD = 0.01;
 /** Only codec padding is skipped; longer quiet intros (the ui-start riser) are content */
@@ -115,16 +120,21 @@ export class AudioEngine {
 
   loadMusic(url: string): Promise<AudioBuffer> {
     let p = this.musicCache.get(url);
-    if (!p) {
-      p = (async () => {
+    if (p) {
+      // LRU: move to the most recent position
+      this.musicCache.delete(url);
+    } else {
+      const load = (async () => {
         await this.unlock();
         const res = await fetch(url);
         if (!res.ok) throw new Error(`Failed to load ${url} (${res.status})`);
         return this.context.decodeAudioData(await res.arrayBuffer());
       })();
-      p.catch(() => this.musicCache.delete(url));
-      this.musicCache.set(url, p);
+      load.catch(() => this.musicCache.get(url) === load && this.musicCache.delete(url));
+      p = load;
     }
+    this.musicCache.set(url, p);
+    while (this.musicCache.size > MUSIC_CACHE_SIZE) this.musicCache.delete(this.musicCache.keys().next().value!);
     return p;
   }
 

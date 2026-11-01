@@ -1,7 +1,7 @@
 import type { Song, Chart, Settings, Difficulty } from '../types';
 import { CMOD_OPTIONS, RATE_OPTIONS } from '../types';
 import type { HostNavigationState } from '../types/multiplayer';
-import type { SongEntry, ChartMeta } from '../core/manifest';
+import { closestChart, type SongEntry, type ChartMeta } from '../core/manifest';
 import { loadSong, songDir, assetUrl } from '../core/loader';
 import { audio } from '../audio';
 import { multiplayerClient, type MultiplayerEvent } from '../multiplayer';
@@ -26,6 +26,8 @@ export interface SongSelectCallbacks {
   onPlay: (entry: SongEntry, difficulty: Difficulty, autoplay: boolean, practice?: PracticeRange) => void;
   onCalibrate: () => void;
   onSettings: (s: Settings) => void;
+  /** Shuffle the listed songs (search applied), each on the chart nearest to `difficulty` */
+  onJukebox: (entries: SongEntry[], difficulty: Difficulty) => void;
 }
 
 const DIFFS: Difficulty[] = ['Beginner', 'Easy', 'Medium', 'Hard', 'Challenge'];
@@ -70,6 +72,7 @@ export class SongSelectScreen {
         <div class="logo" aria-label="Stepmania 99"><span>STEPMANIA</span><b>99</b></div>
         <label class="search"><kbd>/</kbd><input type="search" placeholder="Search songs, artists, packs" aria-label="Search songs" /><span class="search-count"></span></label>
         <div class="select-room"></div>
+        <button class="btn btn-ghost" data-act="jukebox" title="Songs play themselves, shuffled from this list"><kbd>J</kbd> Jukebox</button>
         <button class="btn btn-ghost" data-act="mp"><kbd>M</kbd> Multiplayer</button>
       </header>
       <section class="wheel" aria-label="Songs"><div class="wheel-track"></div><div class="wheel-focus"></div></section>
@@ -81,6 +84,7 @@ export class SongSelectScreen {
       </div>`;
     parent.appendChild(this.root);
     this.root.querySelector('[data-act="mp"]')!.addEventListener('click', () => this.openMultiplayer());
+    this.root.querySelector('[data-act="jukebox"]')!.addEventListener('click', () => this.startJukebox());
     this.root.querySelector('.wheel')!.addEventListener(
       'wheel',
       (e) => {
@@ -145,9 +149,7 @@ export class SongSelectScreen {
   }
 
   private chartFor(entry: SongEntry): ChartMeta {
-    // Closest available difficulty to the one the player is browsing with
-    const want = DIFFS.indexOf(this.diff);
-    return [...entry.charts].sort((a, b) => Math.abs(DIFFS.indexOf(a.difficulty) - want) - Math.abs(DIFFS.indexOf(b.difficulty) - want))[0]!;
+    return closestChart(entry, this.diff);
   }
 
   private get isGuest(): boolean {
@@ -258,6 +260,9 @@ export class SongSelectScreen {
       case 'KeyM':
         this.openMultiplayer();
         break;
+      case 'KeyJ':
+        if (!e.repeat && solo) this.startJukebox();
+        break;
       case 'KeyL':
         void this.copyLink();
         break;
@@ -312,6 +317,12 @@ export class SongSelectScreen {
     if (!cur) return;
     audio.play1('ui-start');
     this.cb.onPlay(cur.entry, cur.meta.difficulty, autoplay);
+  }
+
+  private startJukebox(): void {
+    if (multiplayerClient.getRoom() || this.list.length === 0) return;
+    audio.play1('ui-start');
+    this.cb.onJukebox(this.list, this.diff);
   }
 
   private practiceKey(): string | null {
@@ -483,6 +494,7 @@ export class SongSelectScreen {
     const room = multiplayerClient.getRoom();
     el.innerHTML = room ? roomBarHtml(room) : '';
     (this.root.querySelector('[data-act="mp"]') as HTMLElement).classList.toggle('hidden', !!room);
+    (this.root.querySelector('[data-act="jukebox"]') as HTMLElement).classList.toggle('hidden', !!room);
     if (room)
       bindRoomBar(
         el,
