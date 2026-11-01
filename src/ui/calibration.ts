@@ -6,13 +6,18 @@ import { KEY_TO_DIRECTION } from '../types';
 // Audio-only on purpose — a pulsing visual would mix display latency into
 // the measurement. Taps are timestamped by the event, mapped through the same
 // output clock as gameplay, so the result is exactly the offset the judge needs.
+// The measurement is absolute; the track shows taps against the offset already
+// set, so a run after applying one lands on the middle line.
 // ============================================================================
 
 const BPM = 100;
 const BEAT_MS = 60000 / BPM;
 const WARMUP_BEATS = 4;
 const TARGET_TAPS = 24;
-const MAX_DEVIATION_MS = 160;
+/** Taps further than this from a clap are ignored. Bluetooth output can be 100–200 ms off: half a beat (300 ms) is the hard limit */
+const MAX_DEVIATION_MS = 250;
+/** The track spans ±this around the current offset */
+const TRACK_RANGE_MS = 160;
 
 export interface CalibrationCallbacks {
   onDone: (offsetMs: number | null) => void;
@@ -31,6 +36,8 @@ export function robustOffset(deviations: number[]): { offset: number; spread: nu
   return { offset: Math.round(median), spread };
 }
 
+const fmt = (ms: number): string => `${ms > 0 ? '+' : ''}${ms} ms`;
+
 export class CalibrationScreen {
   private readonly root: HTMLElement;
   private deviations: number[] = [];
@@ -38,6 +45,8 @@ export class CalibrationScreen {
   private scheduledBeats = 0;
   private visible = false;
   private result: { offset: number; spread: number } | null = null;
+  /** Offset in the settings when the screen opened: the track's middle line */
+  private current = 0;
 
   constructor(
     parent: HTMLElement,
@@ -50,6 +59,7 @@ export class CalibrationScreen {
 
   async show(currentOffset: number): Promise<void> {
     this.visible = true;
+    this.current = currentOffset;
     this.deviations = [];
     this.result = null;
     this.scheduledBeats = 0;
@@ -134,7 +144,7 @@ export class CalibrationScreen {
     const track = this.root.querySelector('.calib-track') as HTMLElement;
     const dot = document.createElement('i');
     dot.className = 'calib-tap';
-    dot.style.left = `${50 + (dev / MAX_DEVIATION_MS) * 50}%`;
+    dot.style.left = `${50 + Math.max(-1, Math.min(1, (dev - this.current) / TRACK_RANGE_MS)) * 50}%`;
     track.appendChild(dot);
     dot.animate([{ transform: 'translate(-50%,-50%) scale(2.2)', opacity: 1 }, { transform: 'translate(-50%,-50%) scale(1)', opacity: 0.85 }], { duration: 300, fill: 'forwards' });
     const taps = track.querySelectorAll('.calib-tap');
@@ -147,14 +157,16 @@ export class CalibrationScreen {
     const readout = this.root.querySelector('.calib-readout') as HTMLElement;
     const apply = this.root.querySelector('[data-act="apply"]') as HTMLButtonElement;
     if (!this.result) {
-      readout.innerHTML = n === 0 ? 'Listening… the first 4 claps are a warm-up.' : `${n} taps · keep going`;
+      const middle = `the middle line is your current offset (${fmt(this.current)})`;
+      readout.innerHTML = n === 0 ? `Listening… the first 4 claps are a warm-up · ${middle}` : `${n} taps · keep going · ${middle}`;
       apply.disabled = true;
       return;
     }
     const { offset, spread } = this.result;
     const quality = spread < 12 ? 'very consistent' : spread < 25 ? 'consistent' : 'noisy — try a few more';
     const done = this.deviations.length >= TARGET_TAPS;
-    readout.innerHTML = `Measured offset <b>${offset > 0 ? '+' : ''}${offset} ms</b> · spread ${spread.toFixed(0)} ms (${quality})${done ? ' · <kbd>Enter</kbd> to apply, <kbd>R</kbd> to try again' : ''}`;
+    const vsCurrent = Math.abs(offset - this.current) <= 5 ? 'matches your current offset' : `current ${fmt(this.current)}`;
+    readout.innerHTML = `Measured offset <b>${fmt(offset)}</b> (${vsCurrent}) · spread ${spread.toFixed(0)} ms (${quality})${done ? ' · <kbd>Enter</kbd> to apply, <kbd>R</kbd> to try again' : ''}`;
     apply.disabled = n < TARGET_TAPS / 2;
   }
 
