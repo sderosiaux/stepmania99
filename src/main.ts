@@ -37,6 +37,8 @@ import { multiplayerClient, multiplayerGameManager, type MultiplayerEvent } from
 const JUKEBOX_KEYS = '<span><kbd>←</kbd><kbd>→</kbd>Previous · Next</span><span><kbd>⌫</kbd>Not for me</span><span><kbd>U</kbd>Undo</span><span><kbd>Esc</kbd>Exit</span>';
 /** Songs in a row that fail to load before the jukebox gives up */
 const JUKEBOX_MAX_FAILURES = 5;
+/** Hold Tab: menus run this many times faster, StepMania's fast-forward */
+const TAB_WARP = 4;
 
 class App {
   private readonly ui: HTMLElement;
@@ -58,6 +60,8 @@ class App {
 
   // Menu backdrop clock
   private menuLast = performance.now();
+  /** Tab warp: time and beats gained on top of the music's clock while Tab is held */
+  private warp = { scale: 1, time: 0, beats: 0, lastBeat: null as number | null };
   private previewTiming: { songId: string; timing: TimingData } | null = null;
 
   constructor() {
@@ -85,6 +89,21 @@ class App {
     });
 
     window.addEventListener('resize', () => this.stage.resize());
+    // Tab is StepMania's fast-forward. Left alone, it walks the focus out to the browser's address bar
+    // and the game stops hearing the keyboard; only the multiplayer modal keeps it, to move between its fields.
+    // Capture phase: the search box stops its keys from bubbling.
+    window.addEventListener(
+      'keydown',
+      (e) => {
+        if (e.code !== 'Tab' || (e.target as Element | null)?.closest?.('.modal')) return;
+        e.preventDefault();
+        this.setWarp(TAB_WARP);
+      },
+      true
+    );
+    window.addEventListener('keyup', (e) => e.code === 'Tab' && this.setWarp(1), true);
+    // Released outside the window: no keyup ever comes
+    window.addEventListener('blur', () => this.setWarp(1));
     window.addEventListener('keydown', this.onKey);
     multiplayerClient.addEventListener(this.onMultiplayer);
   }
@@ -430,8 +449,29 @@ class App {
       if (this.previewTiming?.songId !== cur.entry.id) this.previewTiming = { songId: cur.entry.id, timing: buildTimingData(cur.entry.timing) };
       beat = this.previewTiming.timing.timeToBeat(previewMs);
     }
-    this.stage.renderMenu({ time: now / 1000, beat, dt, energy: this.screen === 'results' ? 0.6 : 0.25 });
+    const w = this.warp;
+    const dBeat = w.lastBeat === null ? 0 : beat - w.lastBeat;
+    w.lastBeat = beat;
+    if (w.scale !== 1) {
+      w.time += dt * (w.scale - 1);
+      // At the music's tempo; a jump (preview loop, another song) is not tempo
+      if (dBeat > 0 && dBeat < 1) w.beats += dBeat * (w.scale - 1);
+      // CSS animations and transitions too, including ones that started since the last frame
+      for (const a of document.getAnimations()) a.playbackRate = w.scale;
+    }
+    this.stage.renderMenu({ time: now / 1000 + w.time, beat: beat + w.beats, dt: dt * w.scale, energy: this.screen === 'results' ? 0.6 : 0.25 });
   };
+
+  /** Tab held: the menus' pulse and animations run TAB_WARP× (the music keeps its tempo). Gameplay runs on the music's clock: untouched. */
+  private setWarp(scale: number): void {
+    const w = this.warp;
+    if (w.scale === scale) return;
+    w.scale = scale;
+    if (scale !== 1) return;
+    // Pulse back on the music's beats, not a fraction off
+    w.beats = Math.round(w.beats);
+    for (const a of document.getAnimations()) a.playbackRate = 1;
+  }
 }
 
 const app = new App();
