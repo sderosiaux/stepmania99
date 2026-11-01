@@ -22,6 +22,20 @@ function createClient(): Promise<WebSocket> {
   });
 }
 
+/** Poll until the server accepts a connection: its startup time depends on how busy the machine is */
+async function waitForServer(timeoutMs = 15000): Promise<void> {
+  const until = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      (await createClient()).close();
+      return;
+    } catch (e) {
+      if (Date.now() > until) throw new Error(`Server not up on ${SERVER_URL} after ${timeoutMs} ms: ${String(e)}`);
+      await delay(50);
+    }
+  }
+}
+
 // Helper to send message and wait for response
 function sendAndReceive(ws: WebSocket, message: object, expectedType?: string): Promise<object> {
   return new Promise((resolve, reject) => {
@@ -67,9 +81,8 @@ describe('Multiplayer Server - Host Navigation', () => {
       stdio: 'pipe',
     });
 
-    // Wait for server to start
-    await delay(1000);
-  });
+    await waitForServer();
+  }, 20000);
 
   afterAll(async () => {
     if (serverProcess) {
