@@ -23,5 +23,5 @@
       "@/*": ["src/*"]
     }
   },
-  "include": ["src", "tests", "server/*.js"]
+  "include": ["src", "tests", "server/*.js", "scripts", "electron"]
 }

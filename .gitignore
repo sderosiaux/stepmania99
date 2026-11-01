@@ -38,3 +38,7 @@ public/songs/*
 # Linked _Mazu songs from a local StepMania/OutFox install; only Arcade is versioned
 public/songs/_Mazu/*
 !public/songs/_Mazu/Arcade
+
+# Desktop app build output
+dist-electron/
+release/
