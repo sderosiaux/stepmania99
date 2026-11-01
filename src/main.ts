@@ -78,7 +78,7 @@ class App {
     });
     this.results = new ResultsScreen(this.ui, {
       onContinue: () => this.showSelect(),
-      onRetry: () => this.last && void this.play(this.last.entry, this.last.difficulty, this.last.autoplay, false, this.last.practice),
+      onRetry: () => this.retry(),
       onApplyOffset: (d) => this.updateSettings({ ...this.settings, offsetMs: this.settings.offsetMs + d }),
     });
     this.calibration = new CalibrationScreen(this.ui, {
@@ -354,6 +354,12 @@ class App {
     setTimeout(() => this.screen === 'results' && audio.playMenuMusic(2500), 3600);
   }
 
+  /** Same chart, same mode (practice section, autoplay), from the top. Battles never get here: no pause, no retry. */
+  private retry(): void {
+    const l = this.last;
+    if (l) void this.play(l.entry, l.difficulty, l.autoplay, false, l.practice);
+  }
+
   private quitGame(): void {
     if (this.multiplayer) multiplayerGameManager.notifyDeath();
     this.game?.stop();
@@ -400,6 +406,10 @@ class App {
     } else if (e.code === 'Enter' && this.game.isPaused) {
       e.preventDefault();
       this.game.resume();
+    } else if (e.code === 'KeyR' && this.game.isPaused) {
+      e.preventDefault();
+      audio.play1('ui-start');
+      this.retry();
     }
   };
 

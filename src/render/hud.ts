@@ -320,6 +320,7 @@ export class Hud {
     p.innerHTML = `<div class="hud-pause-card">
       <h2>PAUSED</h2>
       <p><kbd>Enter</kbd> resume after a 3-2-1${multiplayer ? '' : ', right where you stopped'}</p>
+      ${multiplayer ? '' : '<p><kbd>R</kbd> restart from the top</p>'}
       <p><kbd>Esc</kbd> quit to song select</p>
     </div>`;
     this.root.appendChild(p);
