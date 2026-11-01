@@ -69,7 +69,8 @@
       "target": "dir",
       "category": "public.app-category.music-games",
       "identity": "-",
-      "hardenedRuntime": false
+      "hardenedRuntime": false,
+      "icon": "build/icon.png"
     }
   },
   "productName": "StepMania 99"
