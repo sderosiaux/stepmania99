@@ -4,12 +4,6 @@ export function escapeHtml(text: string): string {
   return text.replace(/[&<>"']/g, (c) => ESCAPES[c]!);
 }
 
-/** URL for an asset next to a simfile, safe for CSS url("…") */
-export function assetUrl(basePath: string | undefined, file: string | undefined): string | null {
-  if (!basePath || !file) return null;
-  return encodeURI(`${basePath}/${file}`).replace(/"/g, '%22');
-}
-
 /** Size a canvas backing store to its CSS box × devicePixelRatio; returns a context in CSS pixels */
 export function fitCanvas(canvas: HTMLCanvasElement): { ctx: CanvasRenderingContext2D; w: number; h: number } {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);

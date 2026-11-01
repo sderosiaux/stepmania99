@@ -1,3 +1,13 @@
+// Fonts are bundled, not fetched from Google: the game has to look right offline
+import '@fontsource/chakra-petch/400.css';
+import '@fontsource/chakra-petch/500.css';
+import '@fontsource/chakra-petch/600.css';
+import '@fontsource/chakra-petch/700.css';
+import '@fontsource/chakra-petch/600-italic.css';
+import '@fontsource/chakra-petch/700-italic.css';
+import '@fontsource/orbitron/600.css';
+import '@fontsource/orbitron/800.css';
+import '@fontsource/orbitron/900.css';
 import './styles/base.css';
 import './styles/hud.css';
 import './styles/select.css';

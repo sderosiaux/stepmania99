@@ -2,12 +2,12 @@ import type { Song, Chart, Settings, Difficulty } from '../types';
 import { CMOD_OPTIONS, RATE_OPTIONS } from '../types';
 import type { HostNavigationState } from '../types/multiplayer';
 import type { SongEntry, ChartMeta } from '../core/manifest';
-import { loadSong, songDir } from '../core/loader';
+import { loadSong, songDir, assetUrl } from '../core/loader';
 import { audio } from '../audio';
 import { multiplayerClient, type MultiplayerEvent } from '../multiplayer';
 import { chartStats, type ChartStats } from './chart-stats';
 import { getBest, getLastRunErrors } from './storage';
-import { escapeHtml, assetUrl, fitCanvas, toast } from './dom';
+import { escapeHtml, fitCanvas, toast } from './dom';
 import { THEME } from '../render/theme';
 import { openMultiplayerModal, roomBarHtml, bindRoomBar } from './multiplayer-ui';
 
@@ -803,7 +803,7 @@ export class SongSelectScreen {
         audio.playMenuMusic(600);
         return;
       }
-      void audio.playPreview(`${songDir(cur.entry)}/${cur.entry.musicFile}`, cur.entry.previewStart, cur.entry.previewLength);
+      void audio.playPreview(assetUrl(songDir(cur.entry), cur.entry.musicFile)!, cur.entry.previewStart, cur.entry.previewLength);
     }, PREVIEW_DELAY_MS);
   }
 }

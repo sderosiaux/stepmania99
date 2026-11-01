@@ -28,9 +28,22 @@ function findSongs(dir: string, rel: string[] = []): { rel: string[]; file: stri
   return entries.filter((e) => !e.startsWith('.') && isDir(path.join(dir, e))).flatMap((e) => findSongs(path.join(dir, e), [...rel, e]));
 }
 
+const AUDIO = /\.(mp3|ogg|oga|wav)$/i;
+
+/**
+ * Like StepMania: when #MUSIC names a file that isn't there (renamed audio, Shift-JIS names
+ * read as UTF-8), play the folder's audio instead, skipping a KSF-style "intro" file.
+ */
+function resolveMusic(dir: string, declared: string): string | null {
+  if (declared && fs.existsSync(path.join(dir, declared))) return declared;
+  const audio = fs.readdirSync(dir).filter((f) => AUDIO.test(f)).sort();
+  return (audio.length > 1 && /^intro/i.test(audio[0]!) ? audio[1] : audio[0]) ?? null;
+}
+
 const found = isDir(songsDir) ? findSongs(songsDir) : [];
 const songs: SongEntry[] = [];
 let skipped = 0;
+let noAudio = 0;
 
 for (const { rel, file } of found) {
   const relPath = rel.join('/');
@@ -40,6 +53,14 @@ for (const { rel, file } of found) {
   if (!song) {
     skipped++;
     continue;
+  }
+  if (!song.silent) {
+    const music = resolveMusic(path.join(songsDir, relPath), song.musicFile);
+    if (!music) {
+      noAudio++;
+      continue;
+    }
+    song.musicFile = music;
   }
   const bpms = song.timing.bpms.map((b) => b.bpm);
   const entry: SongEntry = {
@@ -69,4 +90,5 @@ const manifest: SongManifest = { version: MANIFEST_VERSION, generated: new Date(
 fs.mkdirSync(songsDir, { recursive: true });
 fs.writeFileSync(path.join(songsDir, 'manifest.json'), JSON.stringify(manifest));
 const packs = new Set(songs.map((s) => s.pack));
-console.log(`${songs.length} songs in ${packs.size} packs${skipped ? ` (${skipped} without a playable dance-single chart)` : ''}`);
+const left = [skipped && `${skipped} without a playable dance-single chart`, noAudio && `${noAudio} without audio`].filter(Boolean);
+console.log(`${songs.length} songs in ${packs.size} packs${left.length ? ` (${left.join(', ')})` : ''}`);

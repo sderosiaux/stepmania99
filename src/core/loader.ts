@@ -11,7 +11,16 @@ const BASE = import.meta.env.BASE_URL;
 const CACHE_SIZE = 32;
 const cache = new Map<string, Promise<Song>>();
 
-export const songDir = (entry: Pick<SongEntry, 'path'>): string => `${BASE}songs/${entry.path}`;
+// Pack and file names carry '#', '%', '?', '[' … so every path segment is encoded
+const encodePath = (p: string): string => p.split('/').map(encodeURIComponent).join('/');
+
+export const songDir = (entry: Pick<SongEntry, 'path'>): string => `${BASE}songs/${encodePath(entry.path)}`;
+
+/** URL for a file next to a simfile (basePath from songDir), safe for fetch and CSS url("…") */
+export function assetUrl(basePath: string | undefined, file: string | undefined): string | null {
+  if (!basePath || !file) return null;
+  return `${basePath}/${encodePath(file)}`;
+}
 
 export async function loadManifest(): Promise<SongEntry[]> {
   const res = await fetch(`${BASE}songs/manifest.json`, { cache: 'no-cache' });
@@ -34,12 +43,13 @@ export function loadSong(entry: SongEntry): Promise<Song> {
   }
   const p = (async () => {
     const dir = songDir(entry);
-    const res = await fetch(`${dir}/${entry.file}`);
+    const res = await fetch(assetUrl(dir, entry.file)!);
     if (!res.ok) throw new Error(`Could not load ${entry.path} (HTTP ${res.status})`);
     const { song, errors } = parseSimfile(await res.text(), entry.id, dir);
     if (errors.length) console.warn(`Simfile issues in ${entry.path}:`, errors.map((e) => e.message));
     if (!song) throw new Error(`No playable chart in ${entry.path}`);
     song.pack = entry.pack;
+    song.musicFile = entry.musicFile; // the scan resolved #MUSIC against the files on disk
     return song;
   })();
   p.catch(() => cache.delete(entry.id));

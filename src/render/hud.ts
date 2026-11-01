@@ -1,7 +1,8 @@
 import type { JudgmentGrade, HoldGrade, Song, Chart } from '../types';
 import { TIMING_WINDOWS } from '../types';
 import { JUDGMENT_LABEL, THEME } from './theme';
-import { escapeHtml, assetUrl, fitCanvas } from '../ui/dom';
+import { escapeHtml, fitCanvas } from '../ui/dom';
+import { assetUrl } from '../core/loader';
 
 // ============================================================================
 // DOM HUD over the WebGL stage: crisp text, animated with WAAPI (compositor

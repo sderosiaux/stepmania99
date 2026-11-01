@@ -1,6 +1,7 @@
 import type { Song, Chart, Note, Settings, ResultsData, Direction, DirectionStats, HitSample, ErrorMark } from '../types';
 import { DIRECTIONS } from '../types';
 import { audio, type SfxId } from '../audio';
+import { assetUrl } from './loader';
 import { input } from '../input';
 import type { Stage } from '../render/stage';
 import type { Hud } from '../render/hud';
@@ -126,9 +127,10 @@ export class GameController {
     void audio.loadSfx();
 
     let buffer: AudioBuffer | null = null;
-    if (!song.silent) {
+    const musicUrl = song.silent ? null : assetUrl(song.basePath, song.musicFile);
+    if (musicUrl) {
       try {
-        buffer = await audio.loadMusic(`${song.basePath}/${song.musicFile}`);
+        buffer = await audio.loadMusic(musicUrl);
       } catch (e) {
         console.warn('Music unavailable, playing on a silent clock', e);
       }
@@ -149,7 +151,7 @@ export class GameController {
     this.stage.setPerspective(this.settings.perspective);
     this.stage.setFocus(this.settings.focus);
     this.hud.setFocus(this.settings.focus);
-    this.stage.background.setImage(song.background && song.basePath ? `${song.basePath}/${song.background}` : null);
+    this.stage.background.setImage(assetUrl(song.basePath, song.background));
     const badge = [p ? 'PRACTICE' : opts.autoplay ? 'AUTOPLAY' : '', this.rate !== 1 ? `${this.rate}×` : ''].filter(Boolean).join(' · ');
     this.hud.show(song, chart, badge);
     const [l, r] = this.stage.laneScreenSpan();
