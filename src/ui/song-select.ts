@@ -1,12 +1,12 @@
 import type { Song, Chart, Settings, Difficulty } from '../types';
 import type { HostNavigationState } from '../types/multiplayer';
 import { closestChart, DIFFICULTY_ORDER, type SongEntry, type ChartMeta } from '../core/manifest';
-import { buildRows, findRow, groupOf, parseQuery, type WheelRow, type WheelSort } from '../core/wheel';
+import { buildRows, findRow, groupOf, parseQuery, WHEEL_SORTS, type Plays, type WheelRow, type WheelSort } from '../core/wheel';
 import { loadSong, songDir, assetUrl } from '../core/loader';
 import { audio } from '../audio';
 import { multiplayerClient, type MultiplayerEvent } from '../multiplayer';
 import { chartStats, type ChartStats } from './chart-stats';
-import { getBest, getLastRunErrors, getWheelSort, setWheelSort } from './storage';
+import { getBest, getLastRunErrors, getPlays, getWheelSort, setWheelSort } from './storage';
 import { escapeHtml, fitCanvas, toast } from './dom';
 import { THEME } from '../render/theme';
 import { openMultiplayerModal, roomBarHtml, bindRoomBar } from './multiplayer-ui';
@@ -33,6 +33,12 @@ export interface SongSelectCallbacks {
 }
 
 const WHEEL_SPAN = 6;
+const SORT_LABELS: Record<WheelSort, { name: string; groups: string }> = {
+  pack: { name: 'Pack', groups: 'pack' },
+  level: { name: 'Level', groups: 'level' },
+  played: { name: 'Most played', groups: 'played · new' },
+};
+const totalPlays = (p: Plays) => Object.values(p).reduce((n, s) => n + s.count, 0);
 const PREVIEW_DELAY_MS = 220;
 const ERROR_COLORS: Record<string, string> = {
   miss: THEME.judgment.miss,
@@ -49,6 +55,8 @@ export class SongSelectScreen {
   private all: SongEntry[] = [];
   private list: WheelRow[] = [];
   private sort: WheelSort = getWheelSort();
+  /** Play counts the rows were ordered with */
+  private plays: Plays = {};
   private query = '';
   private index = 0;
   private diff: Difficulty = 'Medium';
@@ -73,7 +81,7 @@ export class SongSelectScreen {
       <header class="select-top">
         <div class="logo" aria-label="Stepmania 99"><span>STEPMANIA</span><b>99</b></div>
         <label class="search"><kbd>/</kbd><input type="search" placeholder="Search songs, artists, packs · lv:12" aria-label="Search songs" /><span class="search-count"></span></label>
-        <button class="sort-toggle" data-act="sort" title="Group the wheel by pack or by level"><kbd>G</kbd><span>By</span><b></b></button>
+        <button class="sort-toggle" data-act="sort" title="Order the wheel by pack, level or plays (Shift+G goes back)"><kbd>G</kbd><span>By</span><b></b></button>
         <div class="select-room"></div>
         <button class="btn btn-ghost" data-act="jukebox" title="Songs play themselves, shuffled from this list"><kbd>J</kbd> Jukebox</button>
         <button class="btn btn-ghost" data-act="mp"><kbd>M</kbd> Multiplayer</button>
@@ -88,7 +96,7 @@ export class SongSelectScreen {
     parent.appendChild(this.root);
     this.root.querySelector('[data-act="mp"]')!.addEventListener('click', () => this.openMultiplayer());
     this.root.querySelector('[data-act="jukebox"]')!.addEventListener('click', () => this.startJukebox());
-    this.root.querySelector('[data-act="sort"]')!.addEventListener('click', () => this.toggleSort());
+    this.root.querySelector('[data-act="sort"]')!.addEventListener('click', (e) => this.toggleSort((e as MouseEvent).shiftKey ? -1 : 1));
     this.root.querySelector('.wheel')!.addEventListener(
       'wheel',
       (e) => {
@@ -128,6 +136,9 @@ export class SongSelectScreen {
     if (entries !== this.source) {
       this.source = entries;
       this.all = [...entries].sort((a, b) => a.pack.localeCompare(b.pack) || a.title.localeCompare(b.title));
+      this.applySearch(this.query, false);
+    } else if (this.sort === 'played' && totalPlays(getPlays()) !== totalPlays(this.plays)) {
+      // Back from a run that counted: the song may move up
       this.applySearch(this.query, false);
     }
     this.visible = true;
@@ -182,7 +193,8 @@ export class SongSelectScreen {
   private applySearch(q: string, render = true): void {
     const keep = this.current;
     this.query = q;
-    this.list = buildRows(this.all, parseQuery(q), this.sort);
+    this.plays = getPlays();
+    this.list = buildRows(this.all, parseQuery(q), this.sort, this.plays);
     this.index = keep ? Math.max(0, findRow(this.list, keep.entry.id, keep.meta.difficulty)) : 0;
     this.followRow();
     (this.root.querySelector('.search-count') as HTMLElement).textContent = `${this.list.length}`;
@@ -217,7 +229,7 @@ export class SongSelectScreen {
         if (nav) this.jumpGroup(1);
         break;
       case 'KeyG':
-        if (!e.repeat) this.toggleSort();
+        if (!e.repeat) this.toggleSort(e.shiftKey ? -1 : 1);
         break;
       case 'ArrowLeft':
         this.changeDiff(-1);
@@ -283,7 +295,7 @@ export class SongSelectScreen {
   private jumpGroup(dir: number): void {
     const n = this.list.length;
     if (n === 0) return;
-    const groupAt = (i: number) => groupOf(this.list[((i % n) + n) % n]!, this.sort);
+    const groupAt = (i: number) => groupOf(this.list[((i % n) + n) % n]!, this.sort, this.plays);
     const cur = groupAt(this.index);
     let i = this.index;
     for (let k = 0; k < n && groupAt(i) === cur; k++) i += dir;
@@ -318,8 +330,9 @@ export class SongSelectScreen {
     this.broadcast();
   }
 
-  private toggleSort(): void {
-    this.sort = this.sort === 'pack' ? 'level' : 'pack';
+  private toggleSort(dir: number): void {
+    const n = WHEEL_SORTS.length;
+    this.sort = WHEEL_SORTS[(WHEEL_SORTS.indexOf(this.sort) + dir + n) % n]!;
     setWheelSort(this.sort);
     audio.play1('ui-change', { gain: 0.7 });
     this.applySearch(this.query);
@@ -524,8 +537,8 @@ export class SongSelectScreen {
 
   private renderSort(): void {
     const b = this.root.querySelector('[data-act="sort"]') as HTMLElement;
-    b.querySelector('b')!.textContent = this.sort === 'level' ? 'Level' : 'Pack';
-    b.classList.toggle('on', this.sort === 'level');
+    b.querySelector('b')!.textContent = SORT_LABELS[this.sort].name;
+    b.classList.toggle('on', this.sort !== 'pack');
   }
 
   private renderRoom(): void {
@@ -597,10 +610,11 @@ export class SongSelectScreen {
 
   private wheelItem(row: WheelRow): HTMLElement {
     const { entry } = row;
+    const plays = this.sort === 'played' ? (this.plays[entry.id]?.count ?? 0) : 0;
     const el = document.createElement('button');
     el.className = 'wheel-item';
     el.innerHTML = `
-      <span class="wi-pack">${escapeHtml(entry.pack)}</span>
+      <span class="wi-pack">${plays ? `<b class="wi-plays">${plays} play${plays > 1 ? 's' : ''}</b> · ` : ''}${escapeHtml(entry.pack)}</span>
       <span class="wi-title">${escapeHtml(entry.title)}</span>
       <span class="wi-artist">${escapeHtml(entry.artist)}</span>
       <span class="wi-level"></span>
@@ -830,7 +844,7 @@ export class SongSelectScreen {
     el.innerHTML = `
       ${shown.map(button).join('')}
       <button class="opt opt-more" data-act="options" title="Offset, calibration, view, receptors, effects…"><span class="opt-k"><kbd>O</kbd></span><span class="opt-l">Timing · Display</span><b>Options</b></button>
-      <div class="opt-hints"><span><kbd>↑</kbd><kbd>↓</kbd> song</span><span><kbd>←</kbd><kbd>→</kbd> difficulty</span><span><kbd>PgUp</kbd><kbd>PgDn</kbd> ${this.sort === 'level' ? 'level' : 'pack'}</span><span><kbd>/</kbd> search</span></div>`;
+      <div class="opt-hints"><span><kbd>↑</kbd><kbd>↓</kbd> song</span><span><kbd>←</kbd><kbd>→</kbd> difficulty</span><span><kbd>PgUp</kbd><kbd>PgDn</kbd> ${SORT_LABELS[this.sort].groups}</span><span><kbd>/</kbd> search</span></div>`;
     el.querySelectorAll<HTMLElement>('[data-opt]').forEach((b) =>
       b.addEventListener('click', (e) => this.runOption(b.dataset.opt as OptionId, e.shiftKey ? -1 : 1))
     );

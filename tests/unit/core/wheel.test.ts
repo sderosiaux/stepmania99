@@ -114,3 +114,22 @@ describe('findRow', () => {
     expect(findRow(byPack, 'Nope', 'Hard')).toBe(-1);
   });
 });
+
+describe('most played', () => {
+  const plays = { Charlie: { count: 5, last: 100 }, Bravo: { count: 2, last: 300 }, Alpha: { count: 2, last: 200 } };
+
+  it('orders songs by plays, the latest first among equals, songs never played last in pack order', () => {
+    const more = [...songs, song('Delta', 'P3', [chart('Easy', 3)]), song('Echo', 'P0', [chart('Hard', 9)])];
+    expect(keys(buildRows(more, parseQuery(''), 'played', plays))).toEqual(['Charlie', 'Bravo', 'Alpha', 'Delta', 'Echo']);
+  });
+
+  it('keeps one row per song unless a level is asked for', () => {
+    expect(buildRows(songs, parseQuery(''), 'played', plays).every((r) => r.chart === null)).toBe(true);
+    expect(keys(buildRows(songs, parseQuery('lv:12'), 'played', plays))).toEqual(['Charlie::Medium', 'Alpha::Hard']);
+  });
+
+  it('PgUp/PgDn groups: played, then never played', () => {
+    const rows = buildRows([...songs, song('Delta', 'P3', [chart('Easy', 3)])], parseQuery(''), 'played', { Alpha: { count: 1, last: 1 } });
+    expect(rows.map((r) => groupOf(r, 'played', { Alpha: { count: 1, last: 1 } }))).toEqual(['played', 'new', 'new', 'new']);
+  });
+});

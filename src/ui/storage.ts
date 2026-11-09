@@ -1,6 +1,6 @@
 import type { Settings, LetterGrade, ErrorMark } from '../types';
 import { DEFAULT_SETTINGS, RECEPTOR_STYLES } from '../types';
-import { WHEEL_SORTS, type WheelSort } from '../core/wheel';
+import { WHEEL_SORTS, type PlayStat, type Plays, type WheelSort } from '../core/wheel';
 
 // ============================================================================
 // localStorage persistence: settings and personal bests.
@@ -73,25 +73,63 @@ export function submitScore(songId: string, difficulty: string, record: ScoreRec
 
 type LastRuns = Record<string, { errors: ErrorMark[]; date: number }>;
 
+const readLastRuns = (): LastRuns => {
+  try {
+    return JSON.parse(localStorage.getItem(LAST_RUN_KEY) ?? '{}') as LastRuns;
+  } catch {
+    return {};
+  }
+};
+
 /** Where the last attempt broke: drawn on the song-select density graph */
 export function saveLastRunErrors(songId: string, difficulty: string, errors: ErrorMark[]): void {
-  let book: LastRuns = {};
-  try {
-    book = JSON.parse(localStorage.getItem(LAST_RUN_KEY) ?? '{}') as LastRuns;
-  } catch {
-    /* corrupted: start over */
-  }
+  const book = readLastRuns();
   book[key(songId, difficulty)] = { errors, date: Date.now() };
   localStorage.setItem(LAST_RUN_KEY, JSON.stringify(book));
 }
 
 export function getLastRunErrors(songId: string, difficulty: string): ErrorMark[] | null {
-  try {
-    const book = JSON.parse(localStorage.getItem(LAST_RUN_KEY) ?? '{}') as LastRuns;
-    return book[key(songId, difficulty)]?.errors ?? null;
-  } catch {
-    return null;
+  return readLastRuns()[key(songId, difficulty)]?.errors ?? null;
+}
+
+const PLAYS_KEY = 'sm99.plays.v1';
+
+/**
+ * Plays started before they were counted: each chart with a record or a last run was played at least
+ * once. A lower bound, never more than what happened.
+ */
+function playsFromHistory(): Record<string, PlayStat> {
+  const charts = new Map<string, number>();
+  for (const [k, r] of Object.entries(readScores())) charts.set(k, Math.max(charts.get(k) ?? 0, r.date ?? 0));
+  for (const [k, r] of Object.entries(readLastRuns())) charts.set(k, Math.max(charts.get(k) ?? 0, r.date ?? 0));
+  const plays: Record<string, PlayStat> = {};
+  for (const [k, date] of charts) {
+    const id = k.slice(0, k.lastIndexOf('::'));
+    const p = plays[id];
+    plays[id] = { count: (p?.count ?? 0) + 1, last: Math.max(p?.last ?? 0, date) };
   }
+  return plays;
+}
+
+/** Plays per song: runs that reached the results screen, failed ones included; autoplay and practice aside */
+export function getPlays(): Plays {
+  const raw = localStorage.getItem(PLAYS_KEY);
+  if (raw === null) {
+    const seeded = playsFromHistory();
+    localStorage.setItem(PLAYS_KEY, JSON.stringify(seeded));
+    return seeded;
+  }
+  try {
+    return JSON.parse(raw) as Plays;
+  } catch {
+    return {};
+  }
+}
+
+export function recordPlay(songId: string): void {
+  const plays = { ...getPlays() };
+  plays[songId] = { count: (plays[songId]?.count ?? 0) + 1, last: Date.now() };
+  localStorage.setItem(PLAYS_KEY, JSON.stringify(plays));
 }
 
 const WHEEL_SORT_KEY = 'sm99.wheel.sort.v1';

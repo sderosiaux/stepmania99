@@ -37,7 +37,8 @@
   border-color: rgba(255, 43, 214, 0.65);
   box-shadow: 0 0 30px -8px rgba(255, 43, 214, 0.8);
 }
-.wi-pack { grid-column: 1; font: 600 0.62rem var(--font-ui); letter-spacing: 0.18em; text-transform: uppercase; color: var(--text-muted); }
+.wi-pack { grid-column: 1; font: 600 0.62rem var(--font-ui); letter-spacing: 0.18em; text-transform: uppercase; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wi-plays { font-weight: 800; color: var(--accent-magenta); }
 .wi-title { grid-column: 1; font-weight: 700; font-size: 1.12rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wi-artist { grid-column: 1; font-size: 0.8rem; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wi-level, .wi-grade { grid-row: 1 / -1; align-self: center; }

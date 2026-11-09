@@ -26,7 +26,7 @@ import { SongSelectScreen } from './ui/song-select';
 import { ResultsScreen } from './ui/results';
 import { CalibrationScreen } from './ui/calibration';
 import { toast, escapeHtml } from './ui/dom';
-import { loadSettings, saveSettings, submitScore, getBest, saveLastRunErrors, getForgotten, setForgotten } from './ui/storage';
+import { loadSettings, saveSettings, submitScore, getBest, saveLastRunErrors, recordPlay, getForgotten, setForgotten } from './ui/storage';
 import { multiplayerClient, multiplayerGameManager, type MultiplayerEvent } from './multiplayer';
 
 // ============================================================================
@@ -336,7 +336,10 @@ class App {
     this.game = null;
     document.body.classList.remove('in-game');
     this.screen = 'results';
-    if (!r.autoplay) saveLastRunErrors(r.song.id, r.chart.difficulty, r.errors);
+    if (!r.autoplay) {
+      saveLastRunErrors(r.song.id, r.chart.difficulty, r.errors);
+      recordPlay(r.song.id);
+    }
     const record = r.autoplay || r.failed || r.rate !== 1 || r.handsRemoved > 0
       ? false
       : submitScore(r.song.id, r.chart.difficulty, {

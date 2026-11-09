@@ -2,14 +2,24 @@ import type { Difficulty } from '../types';
 import { DIFFICULTY_ORDER, type ChartMeta, type SongEntry } from './manifest';
 
 // ============================================================================
-// Song wheel rows. By pack, a row is a song, shown on its chart nearest the
-// difficulty being browsed. By level, or once the search asks for a level, a
-// row is one chart: a song with a 9 and a 12 sits in both places. In community
-// packs the difficulty name says little ("Hard" runs from 4 to 25), the level does.
+// Song wheel rows. By pack or by plays, a row is a song, shown on its chart
+// nearest the difficulty being browsed. By level, or once the search asks for a
+// level, a row is one chart: a song with a 9 and a 12 sits in both places. In
+// community packs the difficulty name says little ("Hard" runs from 4 to 25), the level does.
 // ============================================================================
 
-export type WheelSort = 'pack' | 'level';
-export const WHEEL_SORTS: readonly WheelSort[] = ['pack', 'level'];
+export type WheelSort = 'pack' | 'level' | 'played';
+/** The order G cycles through */
+export const WHEEL_SORTS: readonly WheelSort[] = ['pack', 'level', 'played'];
+
+export interface PlayStat {
+  count: number;
+  /** Date.now() of the last play */
+  last: number;
+}
+
+/** Plays per song id */
+export type Plays = Readonly<Record<string, PlayStat>>;
 
 export interface WheelRow {
   /** Stable across rebuilds: the song id, plus the difficulty when the row is one chart */
@@ -69,16 +79,23 @@ const playableCharts = (e: SongEntry): ChartMeta[] => e.charts.filter((c, i, all
 const order = (d: Difficulty) => DIFFICULTY_ORDER.indexOf(d);
 
 /** Wheel rows from songs already in pack/title order */
-export function buildRows(songs: readonly SongEntry[], query: WheelQuery, sort: WheelSort): WheelRow[] {
+export function buildRows(songs: readonly SongEntry[], query: WheelQuery, sort: WheelSort, plays: Plays = {}): WheelRow[] {
   const found = songs.filter((e) => matchesText(e, query.terms));
-  if (sort === 'pack' && !query.level) return found.map((entry) => ({ key: entry.id, entry, chart: null }));
   const { level } = query;
-  const rows: WheelRow[] = found.flatMap((entry) =>
-    playableCharts(entry)
-      .filter((c) => !level || (c.level >= level.min && c.level <= level.max))
-      .map((chart) => ({ key: `${entry.id}::${chart.difficulty}`, entry, chart }))
-  );
-  if (sort === 'level') {
+  const rows: WheelRow[] =
+    sort !== 'level' && !level
+      ? found.map((entry) => ({ key: entry.id, entry, chart: null }))
+      : found.flatMap((entry) =>
+          playableCharts(entry)
+            .filter((c) => !level || (c.level >= level.min && c.level <= level.max))
+            .map((chart) => ({ key: `${entry.id}::${chart.difficulty}`, entry, chart }))
+        );
+  if (sort === 'played') {
+    // Most played first, the latest first among equals; songs never played keep pack order (stable sort)
+    const count = (r: WheelRow) => plays[r.entry.id]?.count ?? 0;
+    const last = (r: WheelRow) => plays[r.entry.id]?.last ?? 0;
+    rows.sort((a, b) => count(b) - count(a) || last(b) - last(a));
+  } else if (sort === 'level') {
     rows.sort(
       (a, b) =>
         a.chart!.level - b.chart!.level ||
@@ -90,8 +107,9 @@ export function buildRows(songs: readonly SongEntry[], query: WheelQuery, sort: 
   return rows;
 }
 
-/** What PgUp/PgDn jump between: packs, or levels when sorted by level */
-export function groupOf(row: WheelRow, sort: WheelSort): string | number {
+/** What PgUp/PgDn jump between: packs, levels, or played / never played */
+export function groupOf(row: WheelRow, sort: WheelSort, plays: Plays = {}): string | number {
+  if (sort === 'played') return plays[row.entry.id] ? 'played' : 'new';
   return sort === 'level' && row.chart ? row.chart.level : row.entry.pack;
 }
 
