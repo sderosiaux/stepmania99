@@ -13,10 +13,10 @@ export const KEY_TO_DIRECTION: Record<string, Direction> = {
   ArrowDown: 'down',
   ArrowUp: 'up',
   ArrowRight: 'right',
-  KeyD: 'left',
-  KeyF: 'down',
-  KeyJ: 'up',
-  KeyK: 'right',
+  KeyS: 'left',
+  KeyD: 'down',
+  KeyK: 'up',
+  KeyL: 'right',
 };
 
 export type Difficulty = 'Beginner' | 'Easy' | 'Medium' | 'Hard' | 'Challenge';
