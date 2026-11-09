@@ -1,5 +1,6 @@
 import type { Settings, LetterGrade, ErrorMark } from '../types';
 import { DEFAULT_SETTINGS, RECEPTOR_STYLES } from '../types';
+import { WHEEL_SORTS, type WheelSort } from '../core/wheel';
 
 // ============================================================================
 // localStorage persistence: settings and personal bests.
@@ -91,6 +92,18 @@ export function getLastRunErrors(songId: string, difficulty: string): ErrorMark[
   } catch {
     return null;
   }
+}
+
+const WHEEL_SORT_KEY = 'sm99.wheel.sort.v1';
+
+/** How the song wheel groups songs: kept between sessions, apart from the gameplay settings */
+export function getWheelSort(): WheelSort {
+  const v = localStorage.getItem(WHEEL_SORT_KEY);
+  return WHEEL_SORTS.find((s) => s === v) ?? 'pack';
+}
+
+export function setWheelSort(sort: WheelSort): void {
+  localStorage.setItem(WHEEL_SORT_KEY, sort);
 }
 
 const FORGOTTEN_KEY = 'sm99.jukebox.forgotten.v1';

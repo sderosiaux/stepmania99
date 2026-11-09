@@ -1,0 +1,116 @@
+import { describe, it, expect } from 'vitest';
+import { buildRows, findRow, groupOf, parseQuery } from '../../../src/core/wheel';
+import type { ChartMeta, SongEntry } from '../../../src/core/manifest';
+import type { Difficulty } from '../../../src/types';
+
+const chart = (difficulty: Difficulty, level: number): ChartMeta => ({ difficulty, level, steps: 100 });
+
+const song = (id: string, pack: string, charts: ChartMeta[], artist = 'A'): SongEntry => ({
+  id,
+  pack,
+  path: `${pack}/${id}`,
+  file: `${id}.sm`,
+  title: id,
+  artist,
+  musicFile: `${id}.ogg`,
+  previewStart: 0,
+  previewLength: 12,
+  bpmMin: 120,
+  bpmMax: 120,
+  timing: { offset: 0, bpms: [{ beat: 0, bpm: 120 }], stops: [] } as unknown as SongEntry['timing'],
+  charts,
+});
+
+// Already in pack/title order, as song select hands them over
+const songs = [
+  song('Alpha', 'P1', [chart('Easy', 4), chart('Hard', 12)]),
+  song('Bravo', 'P1', [chart('Challenge', 9)], 'Zed'),
+  song('Charlie', 'P2', [chart('Medium', 12), chart('Challenge', 15)]),
+];
+
+const keys = (rows: ReturnType<typeof buildRows>) => rows.map((r) => r.key);
+
+describe('parseQuery', () => {
+  it('reads a single level, a range and an open range', () => {
+    expect(parseQuery('lv:12').level).toEqual({ min: 12, max: 12 });
+    expect(parseQuery('lv10-12').level).toEqual({ min: 10, max: 12 });
+    expect(parseQuery('lv:12-10').level).toEqual({ min: 10, max: 12 });
+    expect(parseQuery('LV:12+').level).toEqual({ min: 12, max: Infinity });
+  });
+
+  it('keeps the other words as text terms', () => {
+    expect(parseQuery('Night lv:9 core')).toEqual({ terms: ['night', 'core'], level: { min: 9, max: 9 } });
+  });
+
+  it('intersects several level tokens', () => {
+    expect(parseQuery('lv:8+ lv:5-10').level).toEqual({ min: 8, max: 10 });
+  });
+
+  it('does not empty the wheel on a level token still being typed', () => {
+    expect(parseQuery('lv:')).toEqual({ terms: [], level: null });
+    expect(parseQuery('lv:10-')).toEqual({ terms: [], level: { min: 10, max: 10 } });
+  });
+
+  it('leaves a bare number to the text search: titles have numbers', () => {
+    expect(parseQuery('2049')).toEqual({ terms: ['2049'], level: null });
+  });
+});
+
+describe('buildRows', () => {
+  it('by pack without a level: one row per song, following the browsing difficulty', () => {
+    const rows = buildRows(songs, parseQuery(''), 'pack');
+    expect(keys(rows)).toEqual(['Alpha', 'Bravo', 'Charlie']);
+    expect(rows.every((r) => r.chart === null)).toBe(true);
+  });
+
+  it('by level: one row per chart, levels ascending, titles within a level', () => {
+    const rows = buildRows(songs, parseQuery(''), 'level');
+    expect(keys(rows)).toEqual(['Alpha::Easy', 'Bravo::Challenge', 'Alpha::Hard', 'Charlie::Medium', 'Charlie::Challenge']);
+  });
+
+  it('a level filter in pack order pins each row to the matching chart', () => {
+    const rows = buildRows(songs, parseQuery('lv:12'), 'pack');
+    expect(keys(rows)).toEqual(['Alpha::Hard', 'Charlie::Medium']);
+    expect(rows.map((r) => r.chart?.level)).toEqual([12, 12]);
+  });
+
+  it('combines text and level', () => {
+    expect(keys(buildRows(songs, parseQuery('p2 lv:12+'), 'level'))).toEqual(['Charlie::Medium', 'Charlie::Challenge']);
+    expect(keys(buildRows(songs, parseQuery('zed lv:12'), 'level'))).toEqual([]);
+  });
+
+  it('offers only the first chart of a difficulty name, the one the game plays', () => {
+    const dup = song('Dup', 'P3', [chart('Challenge', 11), chart('Challenge', 14)]);
+    const rows = buildRows([dup], parseQuery(''), 'level');
+    expect(rows.map((r) => [r.key, r.chart?.level])).toEqual([['Dup::Challenge', 11]]);
+    expect(buildRows([dup], parseQuery('lv:14'), 'level')).toEqual([]);
+  });
+});
+
+describe('groupOf', () => {
+  it('groups by pack, or by level when sorted by level', () => {
+    const [byPack] = buildRows(songs, parseQuery(''), 'pack');
+    const [byLevel] = buildRows(songs, parseQuery(''), 'level');
+    expect(groupOf(byPack!, 'pack')).toBe('P1');
+    expect(groupOf(byLevel!, 'level')).toBe(4);
+  });
+});
+
+describe('findRow', () => {
+  const rows = buildRows(songs, parseQuery(''), 'level');
+
+  it('finds the row of the asked chart', () => {
+    expect(rows[findRow(rows, 'Charlie', 'Challenge')]!.key).toBe('Charlie::Challenge');
+  });
+
+  it('falls back to the nearest chart the song has', () => {
+    expect(rows[findRow(rows, 'Alpha', 'Challenge')]!.key).toBe('Alpha::Hard');
+    expect(rows[findRow(rows, 'Alpha', 'Beginner')]!.key).toBe('Alpha::Easy');
+  });
+
+  it('finds an unpinned row by song alone, and nothing for a song not listed', () => {
+    const byPack = buildRows(songs, parseQuery(''), 'pack');
+    expect(findRow(byPack, 'Bravo', 'Beginner')).toBe(1);
+    expect(findRow(byPack, 'Nope', 'Hard')).toBe(-1);
+  });
+});

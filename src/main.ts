@@ -374,7 +374,6 @@ class App {
     saveSettings(s);
     audio.setVolumes({ music: s.musicVolume, sfx: s.sfxVolume, voice: s.voiceVolume });
     this.game?.setSettings(s);
-    if (this.screen === 'song-select') this.select.show(this.songs, s);
   }
 
   // --------------------------------------------------------------------------

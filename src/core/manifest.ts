@@ -43,7 +43,7 @@ export interface SongManifest {
   songs: SongEntry[];
 }
 
-const DIFFICULTY_ORDER: Difficulty[] = ['Beginner', 'Easy', 'Medium', 'Hard', 'Challenge'];
+export const DIFFICULTY_ORDER: readonly Difficulty[] = ['Beginner', 'Easy', 'Medium', 'Hard', 'Challenge'];
 
 /** The song's chart nearest to the difficulty the player is browsing with */
 export function closestChart(entry: Pick<SongEntry, 'charts'>, difficulty: Difficulty): ChartMeta {

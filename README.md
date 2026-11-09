@@ -62,8 +62,8 @@ Up to 8 players in a room. Every 15 combo sends an arrow to a rival, and theirs 
 |---|---|
 | Playing | Arrows or `D` `F` `J` `K`. USB dance pads and gamepads work too. |
 | In a song | `Esc` pause, then `Enter` resume after a 3-2-1 or `R` restart from the top · `V` effects on/off |
-| Song select | `↑` `↓` song · `←` `→` difficulty · `PgUp` `PgDn` pack · `/` search · `Enter` play · `A` autoplay · `S` practice |
-| Options | `-` `=` speed · `,` `.` rate · `[` `]` offset · `C` calibrate · `P` view · `T` assist clap · `N` no hands · `R` receptors · `H` hit ms |
+| Song select | `↑` `↓` song · `←` `→` difficulty · `PgUp` `PgDn` pack (level when grouped by level) · `G` group by pack or level · `/` search, `lv:12`, `lv:10-12` or `lv:12+` for levels · `Enter` play · `A` autoplay · `S` practice |
+| Options | `O` options panel · `-` `=` speed · `,` `.` rate · `[` `]` offset · `C` calibrate · `P` view · `T` assist clap · `N` no hands · `R` receptors · `H` hit ms |
 | Elsewhere | `J` jukebox · `M` multiplayer · `L` copy a link to this chart · hold `Tab` to fast-forward the menus |
 
 **Calibrate before anything else.** `C` plays a clap; tap along with your eyes closed. It measures your offset from the audio alone, since a visual cue would add display lag to the number. On Bluetooth headphones expect 100 ms or more, and calibrate again when you switch outputs.

@@ -1,15 +1,17 @@
 import type { Song, Chart, Settings, Difficulty } from '../types';
-import { CMOD_OPTIONS, RATE_OPTIONS, RECEPTOR_STYLES, RECEPTOR_STYLE_LABELS } from '../types';
 import type { HostNavigationState } from '../types/multiplayer';
-import { closestChart, type SongEntry, type ChartMeta } from '../core/manifest';
+import { closestChart, DIFFICULTY_ORDER, type SongEntry, type ChartMeta } from '../core/manifest';
+import { buildRows, findRow, groupOf, parseQuery, type WheelRow, type WheelSort } from '../core/wheel';
 import { loadSong, songDir, assetUrl } from '../core/loader';
 import { audio } from '../audio';
 import { multiplayerClient, type MultiplayerEvent } from '../multiplayer';
 import { chartStats, type ChartStats } from './chart-stats';
-import { getBest, getLastRunErrors } from './storage';
+import { getBest, getLastRunErrors, getWheelSort, setWheelSort } from './storage';
 import { escapeHtml, fitCanvas, toast } from './dom';
 import { THEME } from '../render/theme';
 import { openMultiplayerModal, roomBarHtml, bindRoomBar } from './multiplayer-ui';
+import { BAR_OPTIONS, OPTIONS, optionForKey, stepOption, type OptionId, type OptionKind } from './options';
+import { openOptionsPanel } from './options-panel';
 
 // ============================================================================
 // Song select: music wheel (left), song + chart detail (right), options bar.
@@ -30,7 +32,6 @@ export interface SongSelectCallbacks {
   onJukebox: (entries: SongEntry[], difficulty: Difficulty) => void;
 }
 
-const DIFFS: Difficulty[] = ['Beginner', 'Easy', 'Medium', 'Hard', 'Challenge'];
 const WHEEL_SPAN = 6;
 const PREVIEW_DELAY_MS = 220;
 const ERROR_COLORS: Record<string, string> = {
@@ -41,12 +42,13 @@ const ERROR_COLORS: Record<string, string> = {
   mine: THEME.mine,
 };
 
-type OptionKind = 'speed' | 'offset' | 'perspective' | 'assist' | 'rate' | 'hitms' | 'focus' | 'receptors' | 'nohands';
-
 export class SongSelectScreen {
   private readonly root: HTMLElement;
+  /** The library as handed over: coming back to the screen with the same one keeps the wheel as it was */
+  private source: readonly SongEntry[] | null = null;
   private all: SongEntry[] = [];
-  private list: SongEntry[] = [];
+  private list: WheelRow[] = [];
+  private sort: WheelSort = getWheelSort();
   private query = '';
   private index = 0;
   private diff: Difficulty = 'Medium';
@@ -70,7 +72,8 @@ export class SongSelectScreen {
     this.root.innerHTML = `
       <header class="select-top">
         <div class="logo" aria-label="Stepmania 99"><span>STEPMANIA</span><b>99</b></div>
-        <label class="search"><kbd>/</kbd><input type="search" placeholder="Search songs, artists, packs" aria-label="Search songs" /><span class="search-count"></span></label>
+        <label class="search"><kbd>/</kbd><input type="search" placeholder="Search songs, artists, packs · lv:12" aria-label="Search songs" /><span class="search-count"></span></label>
+        <button class="sort-toggle" data-act="sort" title="Group the wheel by pack or by level"><kbd>G</kbd><span>By</span><b></b></button>
         <div class="select-room"></div>
         <button class="btn btn-ghost" data-act="jukebox" title="Songs play themselves, shuffled from this list"><kbd>J</kbd> Jukebox</button>
         <button class="btn btn-ghost" data-act="mp"><kbd>M</kbd> Multiplayer</button>
@@ -85,6 +88,7 @@ export class SongSelectScreen {
     parent.appendChild(this.root);
     this.root.querySelector('[data-act="mp"]')!.addEventListener('click', () => this.openMultiplayer());
     this.root.querySelector('[data-act="jukebox"]')!.addEventListener('click', () => this.startJukebox());
+    this.root.querySelector('[data-act="sort"]')!.addEventListener('click', () => this.toggleSort());
     this.root.querySelector('.wheel')!.addEventListener(
       'wheel',
       (e) => {
@@ -121,7 +125,8 @@ export class SongSelectScreen {
 
   show(entries: SongEntry[], settings: Settings): void {
     this.settings = settings;
-    if (entries !== this.all) {
+    if (entries !== this.source) {
+      this.source = entries;
       this.all = [...entries].sort((a, b) => a.pack.localeCompare(b.pack) || a.title.localeCompare(b.title));
       this.applySearch(this.query, false);
     }
@@ -143,13 +148,31 @@ export class SongSelectScreen {
   }
 
   get current(): { entry: SongEntry; meta: ChartMeta } | null {
-    const entry = this.list[this.index];
-    if (!entry) return null;
-    return { entry, meta: this.chartFor(entry) };
+    const row = this.list[this.index];
+    if (!row) return null;
+    return { entry: row.entry, meta: this.chartFor(row) };
   }
 
-  private chartFor(entry: SongEntry): ChartMeta {
-    return closestChart(entry, this.diff);
+  private chartFor(row: WheelRow): ChartMeta {
+    return row.chart ?? closestChart(row.entry, this.diff);
+  }
+
+  /**
+   * A row holding its own chart sets the browsing difficulty: the focused chart then stays the same
+   * when the rows go back to following that difficulty (sort by pack, level filter cleared).
+   */
+  private followRow(): void {
+    const chart = this.list[this.index]?.chart;
+    if (chart) this.diff = chart.difficulty;
+  }
+
+  /** The charts ←/→ step through: all of the song's, or only those the wheel lists when rows hold one chart each */
+  private chartsOffered(entry: SongEntry): ChartMeta[] {
+    if (!this.list[this.index]?.chart) return entry.charts;
+    return this.list
+      .filter((r) => r.entry === entry)
+      .map((r) => r.chart!)
+      .sort((a, b) => DIFFICULTY_ORDER.indexOf(a.difficulty) - DIFFICULTY_ORDER.indexOf(b.difficulty));
   }
 
   private get isGuest(): boolean {
@@ -157,18 +180,12 @@ export class SongSelectScreen {
   }
 
   private applySearch(q: string, render = true): void {
-    const keepId = this.list[this.index]?.id;
+    const keep = this.current;
     this.query = q;
-    const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
-    this.list = terms.length
-      ? this.all.filter((e) => {
-          const hay = `${e.title} ${e.subtitle ?? ''} ${e.artist} ${e.pack}`.toLowerCase();
-          return terms.every((t) => hay.includes(t));
-        })
-      : this.all;
-    const keep = keepId ? this.list.findIndex((e) => e.id === keepId) : -1;
-    this.index = keep >= 0 ? keep : 0;
-    (this.root.querySelector('.search-count') as HTMLElement).textContent = terms.length ? `${this.list.length}` : `${this.all.length}`;
+    this.list = buildRows(this.all, parseQuery(q), this.sort);
+    this.index = keep ? Math.max(0, findRow(this.list, keep.entry.id, keep.meta.difficulty)) : 0;
+    this.followRow();
+    (this.root.querySelector('.search-count') as HTMLElement).textContent = `${this.list.length}`;
     this.wheelItems.forEach((el) => el.remove());
     this.wheelItems.clear();
     if (render && this.visible) {
@@ -194,10 +211,13 @@ export class SongSelectScreen {
         if (nav) this.move(1);
         break;
       case 'PageUp':
-        if (nav) this.jumpPack(-1);
+        if (nav) this.jumpGroup(-1);
         break;
       case 'PageDown':
-        if (nav) this.jumpPack(1);
+        if (nav) this.jumpGroup(1);
+        break;
+      case 'KeyG':
+        if (!e.repeat) this.toggleSort();
         break;
       case 'ArrowLeft':
         this.changeDiff(-1);
@@ -224,44 +244,8 @@ export class SongSelectScreen {
       case 'Delete':
         this.clearPractice();
         break;
-      case 'Minus':
-        this.option('speed', -1);
-        break;
-      case 'Equal':
-        this.option('speed', 1);
-        break;
-      case 'BracketLeft':
-        this.option('offset', -1);
-        break;
-      case 'BracketRight':
-        this.option('offset', 1);
-        break;
-      case 'Comma':
-        if (solo) this.option('rate', -1);
-        break;
-      case 'Period':
-        if (solo) this.option('rate', 1);
-        break;
-      case 'KeyP':
-        this.option('perspective', 1);
-        break;
-      case 'KeyT':
-        this.option('assist', 1);
-        break;
-      case 'KeyH':
-        this.option('hitms', 1);
-        break;
-      case 'KeyV':
-        this.option('focus', 1);
-        break;
-      case 'KeyR':
-        this.option('receptors', e.shiftKey ? -1 : 1);
-        break;
-      case 'KeyN':
-        if (solo) this.option('nohands', 1);
-        break;
-      case 'KeyC':
-        if (solo) this.cb.onCalibrate();
+      case 'KeyO':
+        if (!e.repeat) void this.openOptions();
         break;
       case 'KeyM':
         this.openMultiplayer();
@@ -272,8 +256,11 @@ export class SongSelectScreen {
       case 'KeyL':
         void this.copyLink();
         break;
-      default:
-        return;
+      default: {
+        const opt = optionForKey(e);
+        if (!opt) return;
+        this.runOption(opt.id, opt.dir);
+      }
     }
     e.preventDefault();
   };
@@ -283,6 +270,7 @@ export class SongSelectScreen {
     const next = (((this.index + delta) % this.list.length) + this.list.length) % this.list.length;
     if (next === this.index) return;
     this.index = next;
+    this.followRow();
     this.previewArmed = true;
     audio.play1('ui-move', { gain: 0.6 });
     this.renderWheel();
@@ -291,31 +279,69 @@ export class SongSelectScreen {
     this.broadcast();
   }
 
-  private jumpPack(dir: number): void {
+  /** PgUp/PgDn: to the first row of the previous/next pack, or level when sorted by level */
+  private jumpGroup(dir: number): void {
     const n = this.list.length;
     if (n === 0) return;
-    const packOf = (i: number) => this.list[((i % n) + n) % n]!.pack;
-    const cur = packOf(this.index);
+    const groupAt = (i: number) => groupOf(this.list[((i % n) + n) % n]!, this.sort);
+    const cur = groupAt(this.index);
     let i = this.index;
-    for (let k = 0; k < n && packOf(i) === cur; k++) i += dir;
-    // Land on the first song of that pack
-    const target = packOf(i);
-    for (let k = 0; k < n && packOf(i - 1) === target; k++) i--;
+    for (let k = 0; k < n && groupAt(i) === cur; k++) i += dir;
+    const target = groupAt(i);
+    for (let k = 0; k < n && groupAt(i - 1) === target; k++) i--;
     this.move((((i - this.index) % n) + n) % n);
   }
 
   private changeDiff(dir: number): void {
     const cur = this.current;
     if (!cur) return;
-    const available = cur.entry.charts.map((c) => c.difficulty);
+    const available = this.chartsOffered(cur.entry).map((c) => c.difficulty);
     const pos = available.indexOf(cur.meta.difficulty);
     const next = available[Math.max(0, Math.min(available.length - 1, pos + dir))]!;
     if (next === cur.meta.difficulty) return;
-    this.diff = next;
+    this.selectDiff(next);
+  }
+
+  /** When rows hold one chart each, the song's other chart is another row: the wheel goes there */
+  private selectDiff(d: Difficulty): void {
+    const row = this.list[this.index];
+    if (!row) return;
+    if (row.chart) {
+      const i = this.list.findIndex((r) => r.entry === row.entry && r.chart?.difficulty === d);
+      if (i < 0) return;
+      this.index = i;
+    }
+    this.diff = d;
     audio.play1('ui-change', { gain: 0.7 });
     this.renderDetail();
     this.renderWheel();
     this.broadcast();
+  }
+
+  private toggleSort(): void {
+    this.sort = this.sort === 'pack' ? 'level' : 'pack';
+    setWheelSort(this.sort);
+    audio.play1('ui-change', { gain: 0.7 });
+    this.applySearch(this.query);
+    this.renderSort();
+    this.renderOptions();
+  }
+
+  /**
+   * Focus a song's chart picked elsewhere (link, host, jukebox), at the browsing difficulty `d`.
+   * The search is dropped only when it hides the song or that chart.
+   */
+  private locate(id: string, d: Difficulty): boolean {
+    const entry = this.all.find((e) => e.id === id);
+    if (!entry) return false;
+    const target = closestChart(entry, d).difficulty;
+    if (!this.list.some((r) => r.entry === entry && (!r.chart || r.chart.difficulty === target))) this.applySearch('', false);
+    this.diff = d;
+    const i = findRow(this.list, id, target);
+    if (i < 0) return false;
+    this.index = i;
+    this.followRow();
+    return true;
   }
 
   private play(autoplay: boolean): void {
@@ -328,7 +354,7 @@ export class SongSelectScreen {
   private startJukebox(): void {
     if (multiplayerClient.getRoom() || this.list.length === 0) return;
     audio.play1('ui-start');
-    this.cb.onJukebox(this.list, this.diff);
+    this.cb.onJukebox([...new Set(this.list.map((r) => r.entry))], this.diff);
   }
 
   private practiceKey(): string | null {
@@ -355,28 +381,30 @@ export class SongSelectScreen {
     }
   }
 
+  /** Battle rooms leave out what would make players' runs differ (rate, no hands) and the calibration screen */
+  private runOption(id: OptionId, dir: number): void {
+    if (OPTIONS[id].solo && multiplayerClient.getRoom()) return;
+    if (id === 'calibrate') this.cb.onCalibrate();
+    else this.option(id, dir);
+  }
+
   private option(kind: OptionKind, dir: number): void {
-    const s = { ...this.settings };
-    const step = (opts: readonly number[], cur: number, fallback: number) => {
-      const i = opts.indexOf(cur);
-      return opts[Math.max(0, Math.min(opts.length - 1, (i < 0 ? fallback : i) + dir))]!;
-    };
-    if (kind === 'speed') s.cmod = step(CMOD_OPTIONS, s.cmod, 8);
-    else if (kind === 'offset') s.offsetMs = Math.max(-300, Math.min(300, s.offsetMs + dir * 5));
-    else if (kind === 'rate') s.rate = step(RATE_OPTIONS, s.rate, RATE_OPTIONS.indexOf(1));
-    else if (kind === 'perspective') s.perspective = s.perspective === 'flat' ? 'tilted' : 'flat';
-    else if (kind === 'assist') s.assistTick = !s.assistTick;
-    else if (kind === 'hitms') s.showHitMs = !s.showHitMs;
-    else if (kind === 'nohands') s.noHands = !s.noHands;
-    else if (kind === 'receptors') {
-      const n = RECEPTOR_STYLES.length;
-      s.receptorStyle = RECEPTOR_STYLES[(RECEPTOR_STYLES.indexOf(s.receptorStyle) + dir + n) % n]!;
-    }
-    else s.focus = !s.focus;
-    this.settings = s;
+    this.settings = stepOption(this.settings, kind, dir);
     audio.play1('ui-change', { gain: 0.7 });
-    this.cb.onSettings(s);
+    this.cb.onSettings(this.settings);
     this.renderOptions();
+  }
+
+  private async openOptions(): Promise<void> {
+    audio.play1('ui-select', { gain: 0.6 });
+    window.removeEventListener('keydown', this.onKey);
+    await openOptionsPanel({
+      settings: () => this.settings,
+      inRoom: !!multiplayerClient.getRoom(),
+      change: (kind, dir) => this.option(kind, dir),
+      calibrate: () => this.cb.onCalibrate(),
+    });
+    if (this.visible) window.addEventListener('keydown', this.onKey);
   }
 
   private async openMultiplayer(): Promise<void> {
@@ -405,12 +433,7 @@ export class SongSelectScreen {
 
   /** Focus a song by id (deep link) and play its preview. Returns false when it is not in the library. */
   focusSong(id: string, difficulty?: string | null): boolean {
-    if (!this.list.some((e) => e.id === id)) this.applySearch('', false);
-    const i = this.list.findIndex((e) => e.id === id);
-    if (i < 0) return false;
-    this.index = i;
-    const d = DIFFS.find((x) => x === difficulty);
-    if (d) this.diff = d;
+    if (!this.locate(id, DIFFICULTY_ORDER.find((x) => x === difficulty) ?? this.diff)) return false;
     this.previewArmed = true;
     audio.stopMenuMusic(300);
     if (this.visible) {
@@ -470,10 +493,8 @@ export class SongSelectScreen {
     if (e.type === 'host-navigation' || joinedNav) {
       if (!this.isGuest) return;
       const nav = joinedNav ?? (e.data as HostNavigationState);
-      if (nav.songId && !this.list.some((s) => s.id === nav.songId)) this.applySearch('', false);
-      const i = nav.songId ? this.list.findIndex((s) => s.id === nav.songId) : -1;
-      if (i >= 0) this.index = i;
-      if (nav.difficulty) this.diff = nav.difficulty;
+      if (nav.songId) this.locate(nav.songId, nav.difficulty ?? this.diff);
+      else if (nav.difficulty) this.diff = nav.difficulty;
       this.previewArmed = true;
       if (this.visible) {
         this.renderWheel();
@@ -494,10 +515,17 @@ export class SongSelectScreen {
   // --------------------------------------------------------------------------
 
   private renderAll(): void {
+    this.renderSort();
     this.renderRoom();
     this.renderWheel();
     this.renderDetail();
     this.renderOptions();
+  }
+
+  private renderSort(): void {
+    const b = this.root.querySelector('[data-act="sort"]') as HTMLElement;
+    b.querySelector('b')!.textContent = this.sort === 'level' ? 'Level' : 'Pack';
+    b.classList.toggle('on', this.sort === 'level');
   }
 
   private renderRoom(): void {
@@ -524,14 +552,14 @@ export class SongSelectScreen {
     for (let k = -WHEEL_SPAN; k <= WHEEL_SPAN && n > 0; k++) {
       if (n < 2 * WHEEL_SPAN + 1 && Math.abs(k) > Math.floor(n / 2)) continue;
       const i = (((this.index + k) % n) + n) % n;
-      const entry = this.list[i]!;
-      if (keep.has(entry.id)) continue;
-      keep.add(entry.id);
-      let el = this.wheelItems.get(entry.id);
+      const row = this.list[i]!;
+      if (keep.has(row.key)) continue;
+      keep.add(row.key);
+      let el = this.wheelItems.get(row.key);
       if (!el) {
-        el = this.wheelItem(entry);
+        el = this.wheelItem(row);
         track.appendChild(el);
-        this.wheelItems.set(entry.id, el);
+        this.wheelItems.set(row.key, el);
         // enter from the edge it scrolls in from
         el.style.transform = this.wheelTransform(k + Math.sign(k || 1));
         el.style.opacity = '0';
@@ -541,8 +569,8 @@ export class SongSelectScreen {
       el.style.opacity = String(Math.max(0, 1 - Math.abs(k) * 0.14));
       el.style.zIndex = String(100 - Math.abs(k));
       el.classList.toggle('active', k === 0);
-      const meta = this.chartFor(entry);
-      const best = getBest(entry.id, meta.difficulty);
+      const meta = this.chartFor(row);
+      const best = getBest(row.entry.id, meta.difficulty);
       const level = el.querySelector('.wi-level') as HTMLElement;
       level.textContent = String(meta.level);
       level.dataset.diff = meta.difficulty;
@@ -567,7 +595,8 @@ export class SongSelectScreen {
     return `translate3d(${x}px, ${y}px, 0) rotateX(${-angle}deg) scale(${s})`;
   }
 
-  private wheelItem(entry: SongEntry): HTMLElement {
+  private wheelItem(row: WheelRow): HTMLElement {
+    const { entry } = row;
     const el = document.createElement('button');
     el.className = 'wheel-item';
     el.innerHTML = `
@@ -577,7 +606,7 @@ export class SongSelectScreen {
       <span class="wi-level"></span>
       <span class="wi-grade"></span>`;
     el.addEventListener('click', () => {
-      const i = this.list.indexOf(entry);
+      const i = this.list.indexOf(row);
       if (i === this.index) this.play(false);
       else if (i >= 0) this.move(i - this.index);
     });
@@ -597,6 +626,7 @@ export class SongSelectScreen {
     const art = assetUrl(dir, entry.jacket) ?? assetUrl(dir, entry.background) ?? assetUrl(dir, entry.banner);
     const bpmText = Math.round(entry.bpmMin) === Math.round(entry.bpmMax) ? `${Math.round(entry.bpmMin)}` : `${Math.round(entry.bpmMin)}–${Math.round(entry.bpmMax)}`;
     const inRoom = !!multiplayerClient.getRoom();
+    const offered = new Set(this.chartsOffered(entry).map((c) => c.difficulty));
 
     el.innerHTML = `
       <div class="jacket" style="${art ? `--art: url(&quot;${art}&quot;)` : ''}">
@@ -611,10 +641,11 @@ export class SongSelectScreen {
         <div class="detail-meta"><span><b>${bpmText}</b> BPM</span><span class="meta-len"><b>–:––</b></span><span><b>${meta.steps}</b> steps</span></div>
       </div>
       <div class="ladder" role="listbox" aria-label="Difficulty">
-        ${DIFFS.map((d) => {
+        ${DIFFICULTY_ORDER.map((d) => {
           const c = entry.charts.find((x) => x.difficulty === d);
           const b = c ? getBest(entry.id, d) : null;
-          return `<button class="rung ${c ? '' : 'empty'} ${d === meta.difficulty ? 'active' : ''}" data-diff="${d}" ${c ? '' : 'disabled'}>
+          const state = !c ? 'empty' : offered.has(d) ? '' : 'out';
+          return `<button class="rung ${state} ${d === meta.difficulty ? 'active' : ''}" data-diff="${d}" ${state ? 'disabled' : ''} ${state === 'out' ? 'title="Outside the level filter"' : ''}>
             <span class="rung-name">${d}</span><span class="rung-level">${c ? c.level : '–'}</span><span class="rung-grade" data-grade="${b?.grade ?? ''}">${b?.grade ?? ''}</span>
           </button>`;
         }).join('')}
@@ -644,14 +675,8 @@ export class SongSelectScreen {
         <button class="btn btn-ghost" data-act="link" title="Copy a link that opens this chart"><kbd>L</kbd> Share</button>
       </div>`;
 
-    el.querySelectorAll<HTMLElement>('.rung:not(.empty)').forEach((r) =>
-      r.addEventListener('click', () => {
-        this.diff = r.dataset.diff as Difficulty;
-        audio.play1('ui-change', { gain: 0.7 });
-        this.renderDetail();
-        this.renderWheel();
-        this.broadcast();
-      })
+    el.querySelectorAll<HTMLButtonElement>('.rung:not(:disabled)').forEach((r) =>
+      r.addEventListener('click', () => this.selectDiff(r.dataset.diff as Difficulty))
     );
     el.querySelector('[data-act="play"]')?.addEventListener('click', () => this.play(false));
     el.querySelector('[data-act="demo"]')?.addEventListener('click', () => this.play(true));
@@ -791,30 +816,25 @@ export class SongSelectScreen {
     }
   }
 
+  /** Speed and rate, whatever keeps this run from setting a record, and the way into the options panel */
   private renderOptions(): void {
     const el = this.root.querySelector('.options') as HTMLElement;
     const s = this.settings;
     const inRoom = !!multiplayerClient.getRoom();
+    const button = (id: OptionId) => {
+      const o = OPTIONS[id];
+      return `<button class="opt ${o.warn?.(s) ? 'warn' : ''}" data-opt="${id}" ${o.solo && inRoom ? 'disabled' : ''} title="${escapeHtml(o.hint)}">
+        <span class="opt-k">${o.keys.map((k) => `<kbd>${k}</kbd>`).join('')}</span><span class="opt-l">${o.label}</span><b>${o.value(s)}</b></button>`;
+    };
+    const shown: OptionId[] = [...BAR_OPTIONS, ...(s.noHands ? (['nohands'] as const) : [])];
     el.innerHTML = `
-      <button class="opt" data-opt="speed"><span class="opt-k"><kbd>−</kbd><kbd>=</kbd></span><span class="opt-l">Speed</span><b>C${s.cmod}</b></button>
-      <button class="opt ${s.rate !== 1 ? 'warn' : ''}" data-opt="rate" ${inRoom ? 'disabled' : ''}><span class="opt-k"><kbd>,</kbd><kbd>.</kbd></span><span class="opt-l">Rate</span><b>${s.rate.toFixed(2)}×</b></button>
-      <button class="opt" data-opt="offset"><span class="opt-k"><kbd>[</kbd><kbd>]</kbd></span><span class="opt-l">Offset</span><b>${s.offsetMs > 0 ? '+' : ''}${s.offsetMs} ms</b></button>
-      <button class="opt" data-opt="calibrate" ${inRoom ? 'disabled' : ''}><span class="opt-k"><kbd>C</kbd></span><span class="opt-l">Calibrate</span><b>Tap test</b></button>
-      <button class="opt" data-opt="perspective"><span class="opt-k"><kbd>P</kbd></span><span class="opt-l">View</span><b>${s.perspective === 'flat' ? 'Classic' : 'Highway'}</b></button>
-      <button class="opt" data-opt="assist"><span class="opt-k"><kbd>T</kbd></span><span class="opt-l">Assist tick</span><b>${s.assistTick ? 'On' : 'Off'}</b></button>
-      <button class="opt" data-opt="focus"><span class="opt-k"><kbd>V</kbd></span><span class="opt-l">Effects</span><b>${s.focus ? 'Focus' : 'Full'}</b></button>
-      <button class="opt ${s.noHands ? 'warn' : ''}" data-opt="nohands" ${inRoom ? 'disabled' : ''} title="3 or 4 arrows at once become jumps; runs don't set records"><span class="opt-k"><kbd>N</kbd></span><span class="opt-l">No hands</span><b>${s.noHands ? 'On' : 'Off'}</b></button>
-      <button class="opt" data-opt="receptors"><span class="opt-k"><kbd>R</kbd></span><span class="opt-l">Receptors</span><b>${RECEPTOR_STYLE_LABELS[s.receptorStyle]}</b></button>
-      <button class="opt" data-opt="hitms"><span class="opt-k"><kbd>H</kbd></span><span class="opt-l">Hit ms</span><b>${s.showHitMs ? 'Every hit' : 'Off'}</b></button>
-      <div class="opt-hints"><span><kbd>↑</kbd><kbd>↓</kbd> song</span><span><kbd>←</kbd><kbd>→</kbd> difficulty</span><span><kbd>PgUp</kbd><kbd>PgDn</kbd> pack</span><span><kbd>/</kbd> search</span></div>`;
+      ${shown.map(button).join('')}
+      <button class="opt opt-more" data-act="options" title="Offset, calibration, view, receptors, effects…"><span class="opt-k"><kbd>O</kbd></span><span class="opt-l">Timing · Display</span><b>Options</b></button>
+      <div class="opt-hints"><span><kbd>↑</kbd><kbd>↓</kbd> song</span><span><kbd>←</kbd><kbd>→</kbd> difficulty</span><span><kbd>PgUp</kbd><kbd>PgDn</kbd> ${this.sort === 'level' ? 'level' : 'pack'}</span><span><kbd>/</kbd> search</span></div>`;
     el.querySelectorAll<HTMLElement>('[data-opt]').forEach((b) =>
-      b.addEventListener('click', (e) => {
-        const o = b.dataset.opt!;
-        const dir = (e as MouseEvent).shiftKey ? -1 : 1;
-        if (o === 'calibrate') this.cb.onCalibrate();
-        else this.option(o as OptionKind, dir);
-      })
+      b.addEventListener('click', (e) => this.runOption(b.dataset.opt as OptionId, e.shiftKey ? -1 : 1))
     );
+    el.querySelector('[data-act="options"]')!.addEventListener('click', () => void this.openOptions());
   }
 
   private queuePreview(): void {
