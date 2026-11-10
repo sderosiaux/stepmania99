@@ -29,9 +29,10 @@ html, body {
 }
 
 #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
-/* Night: over the black page, opacity is brightness. The interface dims more than the notes, which must stay readable */
-body.night { --night-stage: 0.75; --night-ui: 0.5; background: #000; }
-body.night #stage { opacity: var(--night-stage); }
+/* Night: the palette is theme.ts's NIGHT (notes, HUD, text). What is left bright is what no token reaches:
+   gradients, jacket art. Over the black page opacity is brightness, so the interface is dimmed as a whole */
+body.night { --night-ui: 0.75; background: #000; }
+body.night { --diff-beginner: #2f7f8a; --diff-easy: #2f7f58; --diff-medium: #8a6a1a; --diff-hard: #a03446; --diff-challenge: #7a4f9c; --line: rgba(120, 115, 140, 0.16); --line-strong: rgba(120, 115, 140, 0.3); }
 /* Everything but the stage: screens, and the panels and toasts that sit on the body */
 body.night > :not(#stage) { opacity: var(--night-ui); }
 #ui { position: fixed; inset: 0; }

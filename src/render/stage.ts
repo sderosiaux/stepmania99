@@ -122,6 +122,7 @@ export class Stage {
     this.bgPass.enabled = !on;
     // With no background pass before it, the playfield pass is the one that clears the frame
     this.mainPass.clear = on;
+    this.playfield.setNight(on);
   }
 
   shake(amount: number): void {

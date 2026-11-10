@@ -153,3 +153,20 @@
 .hud.focus .hud-judgment-text[data-grade='marvelous'] { background-image: linear-gradient(180deg, #ffffff, #bdf6ff); }
 .hud.focus .hud-life { box-shadow: none; }
 .hud-msg-count { margin-bottom: 34vh; font-size: clamp(5rem, 12vw, 9rem); color: #fff; -webkit-text-stroke: 3px rgba(5, 4, 13, 0.85); paint-order: stroke fill; text-shadow: 0 0 40px var(--accent-cyan); }
+
+/* Night: flat, dull colors where the HUD paints white or a rainbow */
+body.night .hud-judgment-text[data-grade] { background-image: linear-gradient(var(--jc), var(--jc)); animation: none; }
+body.night .hud-judgment-text[data-grade='marvelous'] { --jc: var(--judge-marvelous); }
+body.night .hud-judgment-text[data-grade='perfect'] { --jc: var(--judge-perfect); }
+body.night .hud-judgment-text[data-grade='great'] { --jc: var(--judge-great); }
+body.night .hud-judgment-text[data-grade='good'] { --jc: var(--judge-good); }
+body.night .hud-judgment-text[data-grade='boo'] { --jc: var(--judge-boo); }
+body.night .hud-judgment-text[data-grade='miss'] { --jc: var(--judge-miss); }
+body.night .hud-score, body.night .hud-msg-cleared, body.night [class*='hud-msg-fc'] { background-image: linear-gradient(var(--text-primary), var(--text-primary)); animation: none; filter: none; }
+body.night .hud-msg-count { color: var(--text-primary); }
+body.night .hud-combo .hud-combo-num { color: var(--text-secondary); background: none; text-shadow: none; animation: none; }
+body.night .hud-combo[data-tier='1'] .hud-combo-num { color: var(--accent-gold); }
+body.night .hud-combo[data-tier='2'] .hud-combo-num, body.night .hud-combo[data-tier='3'] .hud-combo-num { color: var(--accent-cyan); }
+body.night .hud-life .hud-life-fill { background: var(--accent-success); animation: none; }
+body.night .hud-life[data-state='danger'] .hud-life-fill { background: var(--accent-danger); }
+body.night .hud [class*='hud-msg'] { text-shadow: none; }

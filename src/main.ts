@@ -21,7 +21,7 @@ import { Jukebox } from './core/jukebox';
 import { buildTimingData, type TimingData } from './core/timing-data';
 import { Stage } from './render/stage';
 import { Hud } from './render/hud';
-import { applyThemeVars } from './render/theme';
+import { applyThemeVars, NIGHT, THEME } from './render/theme';
 import { SongSelectScreen } from './ui/song-select';
 import { ResultsScreen } from './ui/results';
 import { CalibrationScreen } from './ui/calibration';
@@ -382,6 +382,7 @@ class App {
   private applyNight(): void {
     const night = this.settings.effects === 'night';
     this.stage.setNight(night);
+    applyThemeVars(night ? NIGHT : THEME);
     document.body.classList.toggle('night', night);
   }
 

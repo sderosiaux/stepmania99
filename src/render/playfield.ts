@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import type { Note, JudgmentGrade, Perspective, ReceptorStyle } from '../types';
 import { RECEPTOR_STYLES } from '../types';
 import type { NoteRuntime } from '../core/judge';
-import { THEME } from './theme';
+import { NIGHT, NIGHT_NOTE_BODY, NIGHT_NOTE_DARK, THEME, type Palette } from './theme';
 
 // ============================================================================
 // Playfield: lanes, receptors, notes, holds, mines, beams, explosions, sparks.
@@ -83,6 +83,10 @@ varying vec2 vPos;
 varying float vFade;
 uniform float uTime;
 uniform float uSheen;
+uniform float uSpec;
+/** Night: how far the face goes toward uBody (0 = the note's own color); the bevel keeps the color */
+uniform float uDark;
+uniform vec3 uBody;
 void main() {
   vec3 n = normalize(vN);
   vec3 L = normalize(vec3(-0.35, 0.55, 1.0));
@@ -94,9 +98,9 @@ void main() {
   float spec = pow(max(dot(reflect(-L, n), vec3(0.0, 0.0, 1.0)), 0.0), 18.0);
   // Bright hues (yellow, cyan) would bloom as a blob: keep every face under the bloom threshold
   float lum = dot(vColor, vec3(0.2126, 0.7152, 0.0722));
-  vec3 c = vColor * diff * grad * 0.7 * mix(1.0, 0.62, smoothstep(0.35, 0.85, lum));
+  vec3 c = mix(vColor * diff * grad * 0.7 * mix(1.0, 0.62, smoothstep(0.35, 0.85, lum)), uBody, uDark * face);
   c += vColor * rim * 1.25;
-  c += vec3(1.0) * spec * 0.45;
+  c += vec3(1.0) * spec * 0.45 * uSpec;
   // inner sheen sweeping across the face
   c += vec3(1.0) * face * smoothstep(0.04, 0.0, abs(vPos.x + vPos.y * 0.6 - fract(uTime * 0.6) * 2.4 + 1.2)) * 0.18 * uSheen;
   gl_FragColor = vec4(mix(vec3(0.12, 0.12, 0.18), c, vFade), 1.0);
@@ -119,6 +123,8 @@ uniform float uDead;
 uniform float uRoll;
 uniform float uLength;
 uniform float uTime;
+uniform float uDark;
+uniform vec3 uBody;
 void main() {
   float x = abs(vUv.x - 0.5) * 2.0;
   float along = vUv.y * uLength;
@@ -131,14 +137,15 @@ void main() {
   }
   float edge = smoothstep(0.62, 0.95, x);
   float core = 1.0 - smoothstep(0.0, 0.7, x);
-  vec3 col = uColor * (0.25 + 0.25 * core) + uColor * edge * 1.1;
+  // Night: a dark body between two colored edges, like the notes
+  vec3 col = mix(uColor * (0.25 + 0.25 * core), uBody, uDark) + uColor * edge * 1.1;
   float flow = 0.0;
   if (uRoll > 0.5) {
     flow = step(0.5, fract(along * 1.6 - abs(vUv.x - 0.5) * 1.2 + uTime * 2.0));
     col *= 0.65 + 0.55 * flow;
   } else {
     flow = smoothstep(0.85, 1.0, sin(along * 6.0 + uTime * 14.0 * uActive)) * core;
-    col += uColor * flow * 0.6 * (0.3 + uActive);
+    col += uColor * flow * 0.6 * (0.3 + uActive) * (1.0 - 0.75 * uDark);
   }
   col *= 0.75 + uActive * 0.35;
   col = mix(col, vec3(0.16, 0.16, 0.24) * (0.6 + 0.4 * edge), uDead);
@@ -165,6 +172,8 @@ uniform float uPulse;
 uniform float uTime;
 /** Index in RECEPTOR_STYLES: 0 tube, 1 hologram */
 uniform float uStyle;
+/** Night: no white-hot core, no lift to a common glow, a softer flash */
+uniform float uCalm;
 
 float sdArrow(vec2 p) {
   float d = dot(p - uPoly[0], p - uPoly[0]);
@@ -195,13 +204,13 @@ float insideOf(float d) {
 void main() {
   vec2 p = (vUv - 0.5) * ${RECEPTOR_QUAD.toFixed(2)};
   vec3 tint = mix(uColor, uFlashColor, uFlash);
-  vec3 hot = mix(tint, vec3(1.0), 0.55);
+  vec3 hot = mix(tint, vec3(1.0), 0.55 * (1.0 - uCalm));
   // Same glow on every lane: at equal values, magenta (luminance ~0.4) stays under the bloom threshold
   // where cyan and green (~0.8) bloom. Lines and halos are lifted to a common luminance; the glass is not.
   float gain = clamp(0.55 / max(dot(tint, vec3(0.2126, 0.7152, 0.0722)), 0.05), 1.0, 1.8);
   // At rest the lines sit just under the bloom threshold (bright, not blinding); the beat and hits push them over.
   // The gain evens out the resting glow only: on a hit every lane flashes alike, else magenta would blow out to white
-  float glow = gain * (1.0 + 0.35 * uPulse) + 0.9 * uFlash;
+  float glow = mix(gain, 1.0, uCalm) * (1.0 + 0.35 * uPulse) + 0.9 * uFlash * (1.0 - 0.6 * uCalm);
   vec3 col;
   float alpha;
 
@@ -338,6 +347,10 @@ export class Playfield {
   private perspective: Perspective = 'flat';
   /** Focus mode: no bursts, sparks, beams, glows or beat pulse — only notes and receptors */
   private focus = false;
+  private palette: Palette = THEME;
+  /** Shared by the note and hold materials */
+  private readonly dark = { value: 0 };
+  private readonly body = { value: new THREE.Color(NIGHT_NOTE_BODY) };
   private dir = -1;
   private maxDistance = 9;
 
@@ -419,6 +432,7 @@ export class Playfield {
           uPulse: { value: 0 },
           uTime: { value: 0 },
           uStyle: { value: 0 },
+          uCalm: { value: 0 },
         },
         transparent: true,
         depthWrite: false,
@@ -432,7 +446,7 @@ export class Playfield {
     }
 
     // Notes (+ dark outline instanced behind)
-    this.noteMat = new THREE.ShaderMaterial({ vertexShader: noteVertex, fragmentShader: noteFragment, uniforms: { uTime: { value: 0 }, uSheen: { value: 1 } } });
+    this.noteMat = new THREE.ShaderMaterial({ vertexShader: noteVertex, fragmentShader: noteFragment, uniforms: { uTime: { value: 0 }, uSheen: { value: 1 }, uSpec: { value: 1 }, uDark: this.dark, uBody: this.body } });
     this.notes = new THREE.InstancedMesh(this.noteGeo, this.noteMat, MAX_NOTES);
     this.fade = new THREE.InstancedBufferAttribute(new Float32Array(MAX_NOTES).fill(1), 1);
     this.notes.geometry = this.noteGeo.clone();
@@ -452,14 +466,15 @@ export class Playfield {
       fragmentShader: /* glsl */ `
         varying vec3 vN; varying vec3 vObjN; varying vec3 vColor; varying vec2 vPos; varying float vFade;
         uniform float uTime;
+        uniform float uDim;
         void main() {
           vec3 n = normalize(vN);
           float rim = pow(1.0 - abs(n.z), 1.5);
           float pulse = 0.6 + 0.4 * sin(uTime * 12.0);
           vec3 c = vec3(0.05, 0.0, 0.02) + vColor * rim * (1.2 + pulse) + vec3(1.0, 0.6, 0.6) * pow(rim, 6.0) * pulse;
-          gl_FragColor = vec4(c, 1.0);
+          gl_FragColor = vec4(c * uDim, 1.0);
         }`,
-      uniforms: { uTime: { value: 0 } },
+      uniforms: { uTime: { value: 0 }, uDim: { value: 1 } },
     });
     const mineGeo = new THREE.IcosahedronGeometry(0.34, 1);
     mineGeo.setAttribute('aFade', new THREE.InstancedBufferAttribute(new Float32Array(128).fill(1), 1));
@@ -481,6 +496,8 @@ export class Playfield {
           uRoll: { value: 0 },
           uLength: { value: 1 },
           uTime: { value: 0 },
+          uDark: this.dark,
+          uBody: this.body,
         },
       });
       const geo = new THREE.PlaneGeometry(1, 1);
@@ -556,6 +573,21 @@ export class Playfield {
     }
   }
 
+  /** Night: low, even luminance, no white, dark-bodied notes and holds (theme.ts). Looks only; what moves is focus's business */
+  setNight(on: boolean): void {
+    this.palette = on ? NIGHT : THEME;
+    this.quantColors.clear();
+    this.noteMat.uniforms.uSpec!.value = on ? 0 : 1;
+    this.dark.value = on ? NIGHT_NOTE_DARK : 0;
+    (this.mines.material as THREE.ShaderMaterial).uniforms.uDim!.value = on ? 0.5 : 1;
+    (this.laneMat.uniforms.uEdge!.value as THREE.Color).set(this.palette.accent.violet);
+    this.receptors.forEach((r, i) => {
+      (r.mat.uniforms.uColor!.value as THREE.Color).set(this.palette.lane[i]!);
+      r.mat.uniforms.uCalm!.value = on ? 1 : 0;
+    });
+    this.beams.forEach((b, i) => (b.mat.uniforms.uColor!.value as THREE.Color).set(this.palette.lane[i]!));
+  }
+
   setPixelScale(heightPx: number): void {
     this.pMat.uniforms.uScale!.value = heightPx * (this.perspective === 'flat' ? 2.2 : 0.55);
   }
@@ -570,7 +602,7 @@ export class Playfield {
   private quantColor(q: number): THREE.Color {
     let c = this.quantColors.get(q);
     if (!c) {
-      c = new THREE.Color(THEME.quant[q] ?? THEME.quant[192]);
+      c = new THREE.Color(this.palette.quant[q] ?? this.palette.quant[192]);
       this.quantColors.set(q, c);
     }
     return c;
@@ -588,7 +620,7 @@ export class Playfield {
 
   hit(lane: number, grade: JudgmentGrade): void {
     if (grade === 'miss') return;
-    const color = THEME.judgment[grade];
+    const color = this.palette.judgment[grade];
     const strong = grade === 'marvelous' || grade === 'perfect';
     const r = this.receptors[lane]!;
     r.flash = 1;
@@ -599,8 +631,8 @@ export class Playfield {
 
   holdDone(lane: number, ok: boolean): void {
     if (!ok) return;
-    this.spawnBurst(lane, THEME.hold.body, true, 1.0, 2.4, 0.3, 0.9);
-    this.spray(lane, THEME.hold.body, 20, 0.9);
+    this.spawnBurst(lane, this.palette.hold.body, true, 1.0, 2.4, 0.3, 0.9);
+    this.spray(lane, this.palette.hold.body, 20, 0.9);
   }
 
   mine(lane: number): void {
@@ -719,7 +751,7 @@ export class Playfield {
           hv.mesh.rotation.z = this.dir < 0 ? Math.PI : 0;
           const u = hv.mat.uniforms;
           const dead = hr.result === 'ng' || missed;
-          (u.uColor!.value as THREE.Color).set(note.type === 'roll' ? THEME.hold.roll : THEME.hold.body);
+          (u.uColor!.value as THREE.Color).set(note.type === 'roll' ? this.palette.hold.roll : this.palette.hold.body);
           u.uActive!.value = active && f.held[note.lane] ? 1 : active ? 0.35 : 0;
           u.uDead!.value = dead ? 1 : 0;
           u.uRoll!.value = note.type === 'roll' ? 1 : 0;
