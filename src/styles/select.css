@@ -47,6 +47,10 @@
 .wi-level[data-diff='Easy'] { color: var(--diff-easy); }
 .wi-level[data-diff='Hard'] { color: var(--diff-hard); }
 .wi-level[data-diff='Challenge'] { color: var(--diff-challenge); }
+/* The personal level under the chart's own: warm when harder for this player, green when easier */
+[data-mine]:not([data-mine=''])::after { content: attr(data-mine); display: block; font: 700 0.68rem var(--font-ui); letter-spacing: 0.04em; color: var(--text-secondary); }
+[data-mine][data-shift='harder']::after, .my-level[data-shift='harder'] b { color: var(--diff-hard); }
+[data-mine][data-shift='easier']::after, .my-level[data-shift='easier'] b { color: var(--diff-easy); }
 .wi-grade { grid-column: 3; font: 900 0.9rem var(--font-display); min-width: 2.6em; text-align: center; color: var(--text-secondary); }
 
 /* Grade colors shared by wheel, ladder, best and results */
@@ -102,6 +106,11 @@
 .best-sub { color: var(--text-secondary); font-size: 0.85rem; }
 .best-sub b { color: var(--accent-gold); }
 .best-none { color: var(--text-muted); }
+.my-level { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.3rem 0.7rem; font-size: 0.85rem; color: var(--text-secondary); }
+.my-level b { font: 900 1.25rem var(--font-display); color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.ml-label { font-size: 0.68rem; letter-spacing: 0.16em; text-transform: uppercase; color: var(--text-muted); }
+.ml-traits { color: var(--accent-cyan); }
+.my-level.learning { color: var(--text-muted); }
 .density { display: block; width: 100%; height: 64px; }
 .chart-row { display: grid; grid-template-columns: 170px 1fr; gap: 1.4rem; align-items: center; }
 .radar { width: 170px; height: 170px; overflow: visible; }

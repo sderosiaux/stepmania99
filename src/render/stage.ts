@@ -23,6 +23,8 @@ export class Stage {
   private readonly camera = new THREE.PerspectiveCamera(FLAT_FOV, 1, 0.1, 200);
   private readonly composer: EffectComposer;
   private readonly bloom: UnrealBloomPass;
+  private readonly bgPass: RenderPass;
+  private readonly mainPass: RenderPass;
   private perspective: Perspective = 'flat';
   private shakeAmount = 0;
   private readonly basePos = new THREE.Vector3();
@@ -37,13 +39,13 @@ export class Stage {
     this.scene.add(this.playfield.group);
 
     this.composer = new EffectComposer(this.renderer);
-    const bgPass = new RenderPass(this.background.scene, this.background.camera);
-    const mainPass = new RenderPass(this.scene, this.camera);
-    mainPass.clear = false;
-    mainPass.clearDepth = true;
+    this.bgPass = new RenderPass(this.background.scene, this.background.camera);
+    this.mainPass = new RenderPass(this.scene, this.camera);
+    this.mainPass.clear = false;
+    this.mainPass.clearDepth = true;
     this.bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.7, 0.45, 0.82);
-    this.composer.addPass(bgPass);
-    this.composer.addPass(mainPass);
+    this.composer.addPass(this.bgPass);
+    this.composer.addPass(this.mainPass);
     this.composer.addPass(this.bloom);
     this.composer.addPass(new OutputPass());
 
@@ -113,6 +115,13 @@ export class Stage {
     this.background.setFocus(on);
     this.playfield.setFocus(on);
     if (on) this.shakeAmount = 0;
+  }
+
+  /** Night mode: the background is not drawn at all, in menus as in play: notes on black */
+  setNight(on: boolean): void {
+    this.bgPass.enabled = !on;
+    // With no background pass before it, the playfield pass is the one that clears the frame
+    this.mainPass.clear = on;
   }
 
   shake(amount: number): void {

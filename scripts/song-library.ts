@@ -8,9 +8,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseSimfile } from '../src/parser/simfile';
 import { MANIFEST_VERSION, type SongEntry, type SongManifest } from '../src/core/manifest';
+import { PATTERNS_VERSION, chartWindows, packWindows, type PatternsFile } from '../src/core/patterns';
 
 export interface SongLibrary {
   manifest: SongManifest;
+  /** Pattern windows of every playable chart: what the personal level is computed from */
+  patterns: PatternsFile;
   /** Pack name → the root folder holding it */
   packRoots: Map<string, string>;
   /** Simfiles without a playable dance-single chart */
@@ -20,6 +23,8 @@ export interface SongLibrary {
 }
 
 type Outcome = SongEntry | 'no-chart' | 'no-audio';
+/** Packed pattern windows by difficulty */
+type ChartPatterns = Record<string, number[]>;
 
 /**
  * Parsing costs ~2 ms a simfile, seconds for a big library. A result is reused while the simfile and its
@@ -28,7 +33,7 @@ type Outcome = SongEntry | 'no-chart' | 'no-audio';
  */
 export interface ScanCache {
   build: string;
-  songs: Record<string, { stamp: string; outcome: Outcome }>;
+  songs: Record<string, { stamp: string; outcome: Outcome; patterns?: ChartPatterns }>;
 }
 
 export interface ScanOptions {
@@ -66,14 +71,14 @@ function resolveMusic(dir: string, declared: string): string | null {
   return (audio.length > 1 && /^intro/i.test(audio[0]!) ? audio[1] : audio[0]) ?? null;
 }
 
-function readSong(dir: string, rel: string[], file: string): Outcome {
+function readSong(dir: string, rel: string[], file: string): { outcome: Outcome; patterns?: ChartPatterns } {
   // The relative path is unique; flattening '/' to '_' made A_B/C and A/B_C collide
   const id = rel.join('/');
   const { song } = parseSimfile(fs.readFileSync(path.join(dir, file), 'utf8'), id);
-  if (!song) return 'no-chart';
+  if (!song) return { outcome: 'no-chart' };
   if (!song.silent) {
     const music = resolveMusic(dir, song.musicFile);
-    if (!music) return 'no-audio';
+    if (!music) return { outcome: 'no-audio' };
     song.musicFile = music;
   }
   const bpms = song.timing.bpms.map((b) => b.bpm);
@@ -97,7 +102,10 @@ function readSong(dir: string, rel: string[], file: string): Outcome {
   if (song.banner) entry.banner = song.banner;
   if (song.background) entry.background = song.background;
   if (song.jacket) entry.jacket = song.jacket;
-  return entry;
+  // Two charts under one difficulty name: only the first can be played, so only it is described
+  const patterns: ChartPatterns = {};
+  for (const c of song.charts) patterns[c.difficulty] ??= packWindows(chartWindows(c.notes));
+  return { outcome: entry, patterns };
 }
 
 const stampOf = (simfile: string, dir: string): string => {
@@ -111,6 +119,7 @@ export async function scanSongLibrary(roots: readonly string[], opts: ScanOption
   const cache: ScanCache = { build, songs: {} };
   const packRoots = new Map<string, string>();
   const songs: SongEntry[] = [];
+  const patterns: PatternsFile = { version: PATTERNS_VERSION, charts: {} };
   let skipped = 0;
   let noAudio = 0;
   let lastYield = performance.now();
@@ -125,11 +134,15 @@ export async function scanSongLibrary(roots: readonly string[], opts: ScanOption
         const simfile = path.join(dir, file);
         const stamp = stampOf(simfile, dir);
         const hit = previous[simfile];
-        const outcome = hit?.stamp === stamp ? hit.outcome : readSong(dir, rel, file);
-        cache.songs[simfile] = { stamp, outcome };
+        const read = hit?.stamp === stamp ? hit : readSong(dir, rel, file);
+        const { outcome } = read;
+        cache.songs[simfile] = { stamp, ...read };
         if (outcome === 'no-chart') skipped++;
         else if (outcome === 'no-audio') noAudio++;
-        else songs.push(outcome);
+        else {
+          songs.push(outcome);
+          for (const [difficulty, packed] of Object.entries(read.patterns ?? {})) patterns.charts[`${outcome.id}::${difficulty}`] = packed;
+        }
         if (opts.yieldEveryMs && performance.now() - lastYield > opts.yieldEveryMs) {
           await new Promise((r) => setImmediate(r));
           lastYield = performance.now();
@@ -139,7 +152,7 @@ export async function scanSongLibrary(roots: readonly string[], opts: ScanOption
   }
 
   const manifest: SongManifest = { version: MANIFEST_VERSION, generated: new Date().toISOString(), songs };
-  return { library: { manifest, packRoots, skipped, noAudio }, cache };
+  return { library: { manifest, patterns, packRoots, skipped, noAudio }, cache };
 }
 
 export function describeLibrary(l: SongLibrary): string {

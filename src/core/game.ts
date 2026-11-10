@@ -157,8 +157,8 @@ export class GameController {
     // Visuals
     this.stage.setPerspective(this.settings.perspective);
     this.stage.playfield.setReceptorStyle(this.settings.receptorStyle);
-    this.stage.setFocus(this.settings.focus);
-    this.hud.setFocus(this.settings.focus);
+    this.stage.setFocus(this.settings.effects !== 'full');
+    this.hud.setFocus(this.settings.effects !== 'full');
     this.stage.background.setImage(assetUrl(song.basePath, song.background));
     const badge = [p ? 'PRACTICE' : opts.jukebox ? 'JUKEBOX' : opts.autoplay ? 'AUTOPLAY' : '', this.rate !== 1 ? `${this.rate}×` : '', this.handsRemoved ? 'NO HANDS' : '']
       .filter(Boolean)
@@ -244,7 +244,7 @@ export class GameController {
     input.stop();
     this.hud.showPause(false, false);
     this.hud.hide();
-    // Menus keep their effects; focus is a gameplay mode
+    // Menus keep their effects; focus is a gameplay mode (night, which reaches the menus, is main.ts's)
     this.stage.setFocus(false);
     this.hud.setFocus(false);
     multiplayerGameManager.setOnAttackReceived(() => {});
@@ -255,8 +255,8 @@ export class GameController {
     // The rate is fixed for the run: the audio timeline was built with it
     this.settings = { ...s, rate: this.settings.rate };
     if (this.phase !== 'done') {
-      this.stage.setFocus(s.focus);
-      this.hud.setFocus(s.focus);
+      this.stage.setFocus(s.effects !== 'full');
+      this.hud.setFocus(s.effects !== 'full');
     }
   }
 

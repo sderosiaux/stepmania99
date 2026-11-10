@@ -27,6 +27,8 @@ import { ResultsScreen } from './ui/results';
 import { CalibrationScreen } from './ui/calibration';
 import { toast, escapeHtml } from './ui/dom';
 import { loadSettings, saveSettings, submitScore, getBest, saveLastRunErrors, recordPlay, getForgotten, setForgotten } from './ui/storage';
+import { myLevels } from './ui/my-levels';
+import { stepOption } from './ui/options';
 import { multiplayerClient, multiplayerGameManager, type MultiplayerEvent } from './multiplayer';
 
 // ============================================================================
@@ -69,6 +71,7 @@ class App {
     const canvas = document.getElementById('stage') as HTMLCanvasElement;
     this.ui = document.getElementById('ui') as HTMLElement;
     this.stage = new Stage(canvas);
+    this.applyNight();
     this.hud = new Hud(this.ui);
     this.select = new SongSelectScreen(this.ui, this.settings, {
       onPlay: (entry, difficulty, autoplay, practice) => void this.play(entry, difficulty, autoplay, false, practice),
@@ -112,6 +115,8 @@ class App {
     const loading = document.getElementById('loading')!;
     try {
       this.songs = await loadManifest();
+      // Personal levels come in behind the menus: the wheel does not wait for them
+      void myLevels.load(this.songs).catch((e) => console.warn('Personal levels unavailable', e));
     } catch (e) {
       console.error(e);
     }
@@ -339,6 +344,7 @@ class App {
     if (!r.autoplay) {
       saveLastRunErrors(r.song.id, r.chart.difficulty, r.errors);
       recordPlay(r.song.id);
+      myLevels.record(r, !this.multiplayer && !this.last?.practice);
     }
     const record = r.autoplay || r.failed || r.rate !== 1 || r.handsRemoved > 0
       ? false
@@ -372,9 +378,17 @@ class App {
     this.showSelect();
   }
 
+  /** Night reaches every screen, unlike focus: the stage goes black and the page dims (base.css) */
+  private applyNight(): void {
+    const night = this.settings.effects === 'night';
+    this.stage.setNight(night);
+    document.body.classList.toggle('night', night);
+  }
+
   private updateSettings(s: Settings): void {
     this.settings = s;
     saveSettings(s);
+    this.applyNight();
     audio.setVolumes({ music: s.musicVolume, sfx: s.sfxVolume, voice: s.voiceVolume });
     this.game?.setSettings(s);
   }
@@ -391,7 +405,7 @@ class App {
     }
     if (e.code === 'KeyV') {
       e.preventDefault();
-      this.updateSettings({ ...this.settings, focus: !this.settings.focus });
+      this.updateSettings(stepOption(this.settings, 'effects', e.shiftKey ? -1 : 1));
       return;
     }
     if (e.code === 'Escape') {

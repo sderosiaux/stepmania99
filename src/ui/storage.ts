@@ -1,6 +1,7 @@
 import type { Settings, LetterGrade, ErrorMark } from '../types';
-import { DEFAULT_SETTINGS, RECEPTOR_STYLES } from '../types';
+import { DEFAULT_SETTINGS, EFFECTS, RECEPTOR_STYLES } from '../types';
 import { WHEEL_SORTS, type PlayStat, type Plays, type WheelSort } from '../core/wheel';
+import type { RunLog } from '../core/my-level';
 
 // ============================================================================
 // localStorage persistence: settings and personal bests.
@@ -20,6 +21,7 @@ export function loadSettings(): Settings {
     }
     // Saved by another build: a style that no longer exists
     if (!RECEPTOR_STYLES.includes(s.receptorStyle)) s.receptorStyle = DEFAULT_SETTINGS.receptorStyle;
+    if (!EFFECTS.includes(s.effects)) s.effects = DEFAULT_SETTINGS.effects;
     return s;
   } catch {
     return { ...DEFAULT_SETTINGS };
@@ -90,6 +92,50 @@ export function saveLastRunErrors(songId: string, difficulty: string, errors: Er
 
 export function getLastRunErrors(songId: string, difficulty: string): ErrorMark[] | null {
   return readLastRuns()[key(songId, difficulty)]?.errors ?? null;
+}
+
+export interface PastRun {
+  /** `songId::difficulty` */
+  key: string;
+  date: number;
+  errors: ErrorMark[];
+  /** The run that set the chart's record, so played to the end; any other may have failed */
+  cleared: boolean;
+}
+
+/** The last run of each chart, from before runs were logged: what the personal levels start from */
+export function pastRuns(): PastRun[] {
+  const scores = readScores();
+  // A record and its run's errors are saved in the same tick
+  return Object.entries(readLastRuns()).map(([k, r]) => {
+    const best = scores[k];
+    return { key: k, date: r.date, errors: r.errors, cleared: !!best && best.grade !== 'E' && Math.abs(best.date - r.date) < 5000 };
+  });
+}
+
+const RUNS_KEY = 'sm99.runs.v1';
+/** ~100 bytes a run: the oldest go first, they describe an earlier player anyway */
+const MAX_RUNS = 600;
+
+export interface RunBook {
+  /** pastRuns() has been brought in: it needs the chart patterns, which may arrive after the first new run */
+  seeded: boolean;
+  runs: RunLog[];
+}
+
+/** Runs the personal levels learn from, oldest first */
+export function getRunBook(): RunBook {
+  try {
+    const book = JSON.parse(localStorage.getItem(RUNS_KEY) ?? 'null') as Partial<RunBook> | null;
+    return { seeded: book?.seeded === true, runs: Array.isArray(book?.runs) ? book.runs : [] };
+  } catch {
+    return { seeded: false, runs: [] };
+  }
+}
+
+export function saveRunBook(book: RunBook): void {
+  const runs = [...book.runs].sort((a, b) => a.date - b.date).slice(-MAX_RUNS);
+  localStorage.setItem(RUNS_KEY, JSON.stringify({ seeded: book.seeded, runs }));
 }
 
 const PLAYS_KEY = 'sm99.plays.v1';

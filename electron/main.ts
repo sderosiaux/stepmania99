@@ -102,6 +102,7 @@ function serve(library: Promise<SongLibrary>): void {
     if (!rel.startsWith(BASE)) return notFound();
     rel = rel.slice(BASE.length);
     if (rel === 'songs/manifest.json') return Response.json((await library).manifest);
+    if (rel === 'songs/patterns.json') return Response.json((await library).patterns);
     if (rel.startsWith('songs/')) {
       const songRel = rel.slice('songs/'.length);
       const root = (await library).packRoots.get(songRel.split('/')[0]!);

@@ -39,7 +39,7 @@ describe('parseQuery', () => {
   });
 
   it('keeps the other words as text terms', () => {
-    expect(parseQuery('Night lv:9 core')).toEqual({ terms: ['night', 'core'], level: { min: 9, max: 9 } });
+    expect(parseQuery('Night lv:9 core')).toEqual({ terms: ['night', 'core'], level: { min: 9, max: 9 }, mine: null });
   });
 
   it('intersects several level tokens', () => {
@@ -47,12 +47,47 @@ describe('parseQuery', () => {
   });
 
   it('does not empty the wheel on a level token still being typed', () => {
-    expect(parseQuery('lv:')).toEqual({ terms: [], level: null });
-    expect(parseQuery('lv:10-')).toEqual({ terms: [], level: { min: 10, max: 10 } });
+    expect(parseQuery('lv:')).toEqual({ terms: [], level: null, mine: null });
+    expect(parseQuery('lv:10-')).toEqual({ terms: [], level: { min: 10, max: 10 }, mine: null });
+    expect(parseQuery('my:')).toEqual({ terms: [], level: null, mine: null });
   });
 
   it('leaves a bare number to the text search: titles have numbers', () => {
-    expect(parseQuery('2049')).toEqual({ terms: ['2049'], level: null });
+    expect(parseQuery('2049')).toEqual({ terms: ['2049'], level: null, mine: null });
+  });
+});
+
+describe('personal levels', () => {
+  // Alpha's 12 plays like a 9 for this player; Charlie's 12 like a 14; Bravo was never analysed
+  const mine: Record<string, number> = { 'Alpha::Easy': 3.6, 'Alpha::Hard': 9.4, 'Charlie::Medium': 13.6, 'Charlie::Challenge': 15.2 };
+  const myLevel = (id: string, d: Difficulty) => mine[`${id}::${d}`];
+
+  it('reads my: tokens apart from lv: ones', () => {
+    expect(parseQuery('my:12 lv:10+')).toEqual({ terms: [], level: { min: 10, max: Infinity }, mine: { min: 12, max: 12 } });
+    expect(parseQuery('MY13-15').mine).toEqual({ min: 13, max: 15 });
+  });
+
+  it('my: keeps the charts whose personal level rounds into the range, one row per chart', () => {
+    expect(keys(buildRows(songs, parseQuery('my:14-15'), 'pack', {}, myLevel))).toEqual(['Charlie::Medium', 'Charlie::Challenge']);
+    expect(keys(buildRows(songs, parseQuery('my:9'), 'pack', {}, myLevel))).toEqual(['Alpha::Hard']);
+  });
+
+  it('my: leaves out charts that have no personal level', () => {
+    expect(keys(buildRows(songs, parseQuery('my:1+'), 'pack', {}, myLevel))).not.toContain('Bravo::Challenge');
+    expect(buildRows(songs, parseQuery('my:1+'), 'pack')).toEqual([]);
+  });
+
+  it('by my level: ordered by it, a chart without one standing at its own level', () => {
+    expect(keys(buildRows(songs, parseQuery(''), 'mine', {}, myLevel))).toEqual(['Alpha::Easy', 'Bravo::Challenge', 'Alpha::Hard', 'Charlie::Medium', 'Charlie::Challenge']);
+  });
+
+  it('by my level with none yet: the same wheel as by level', () => {
+    expect(keys(buildRows(songs, parseQuery(''), 'mine'))).toEqual(keys(buildRows(songs, parseQuery(''), 'level')));
+  });
+
+  it('groups by the rounded personal level', () => {
+    const rows = buildRows(songs, parseQuery(''), 'mine', {}, myLevel);
+    expect(rows.map((r) => groupOf(r, 'mine', {}, myLevel))).toEqual([4, 9, 9, 14, 15]);
   });
 });
 

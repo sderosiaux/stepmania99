@@ -276,6 +276,15 @@ export const RECEPTOR_STYLE_LABELS: Record<ReceptorStyle, string> = {
   hologram: 'Hologram',
 };
 
+/**
+ * How much light the game puts out. Focus is a gameplay mode: no bloom, bursts, particles or glows,
+ * only notes and receptors. Night is Focus for a dark room: black background everywhere, menus
+ * included, and the whole picture dimmed, the interface more than the notes.
+ */
+export const EFFECTS = ['full', 'focus', 'night'] as const;
+export type Effects = (typeof EFFECTS)[number];
+export const EFFECTS_LABELS: Record<Effects, string> = { full: 'Full', focus: 'Focus', night: 'Night' };
+
 export interface Settings {
   /** Global offset in ms: + means you hear the music later than the game assumes */
   offsetMs: number;
@@ -291,8 +300,7 @@ export interface Settings {
   rate: number;
   /** Show the ms offset under every judgment, Marvelous included */
   showHitMs: boolean;
-  /** No bloom, bursts, particles or glows: only notes and receptors */
-  focus: boolean;
+  effects: Effects;
   receptorStyle: ReceptorStyle;
   /** Hands (3–4 arrows at once) become jumps; battles keep the chart as it is */
   noHands: boolean;
@@ -313,7 +321,7 @@ export const DEFAULT_SETTINGS: Settings = {
   voiceVolume: 0.9,
   rate: 1,
   showHitMs: false,
-  focus: false,
+  effects: 'full',
   receptorStyle: 'tube',
   noHands: false,
 };

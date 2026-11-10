@@ -7,6 +7,8 @@ import { audio } from '../audio';
 import { multiplayerClient, type MultiplayerEvent } from '../multiplayer';
 import { chartStats, type ChartStats } from './chart-stats';
 import { getBest, getLastRunErrors, getPlays, getWheelSort, setWheelSort } from './storage';
+import { myLevels } from './my-levels';
+import type { PatternFeature } from '../core/patterns';
 import { escapeHtml, fitCanvas, toast } from './dom';
 import { THEME } from '../render/theme';
 import { openMultiplayerModal, roomBarHtml, bindRoomBar } from './multiplayer-ui';
@@ -36,10 +38,23 @@ const WHEEL_SPAN = 6;
 const SORT_LABELS: Record<WheelSort, { name: string; groups: string }> = {
   pack: { name: 'Pack', groups: 'pack' },
   level: { name: 'Level', groups: 'level' },
+  mine: { name: 'My level', groups: 'my level' },
   played: { name: 'Most played', groups: 'played · new' },
 };
 const totalPlays = (p: Plays) => Object.values(p).reduce((n, s) => n + s.count, 0);
 const PREVIEW_DELAY_MS = 220;
+const TRAIT_LABELS: Record<PatternFeature, string> = {
+  speed: 'speed',
+  jack: 'jacks',
+  jump: 'jumps',
+  hand: 'hands',
+  hold: 'holds in hand',
+  stamina: 'stamina',
+  rhythm: 'rhythm changes',
+};
+/** Under half a level, the personal level agrees with the chart's own */
+const shiftOf = (mine: number, level: number): 'harder' | 'easier' | 'same' => (mine - level >= 0.5 ? 'harder' : level - mine >= 0.5 ? 'easier' : 'same');
+const myLevelOf = (songId: string, difficulty: Difficulty) => myLevels.level(songId, difficulty);
 const ERROR_COLORS: Record<string, string> = {
   miss: THEME.judgment.miss,
   boo: THEME.judgment.boo,
@@ -80,8 +95,8 @@ export class SongSelectScreen {
     this.root.innerHTML = `
       <header class="select-top">
         <div class="logo" aria-label="Stepmania 99"><span>STEPMANIA</span><b>99</b></div>
-        <label class="search"><kbd>/</kbd><input type="search" placeholder="Search songs, artists, packs · lv:12" aria-label="Search songs" /><span class="search-count"></span></label>
-        <button class="sort-toggle" data-act="sort" title="Order the wheel by pack, level or plays (Shift+G goes back)"><kbd>G</kbd><span>By</span><b></b></button>
+        <label class="search"><kbd>/</kbd><input type="search" placeholder="Search · lv:12 · my:12" aria-label="Search songs" /><span class="search-count"></span></label>
+        <button class="sort-toggle" data-act="sort" title="Order the wheel by pack, level, my level or plays (Shift+G goes back)"><kbd>G</kbd><span>By</span><b></b></button>
         <div class="select-room"></div>
         <button class="btn btn-ghost" data-act="jukebox" title="Songs play themselves, shuffled from this list"><kbd>J</kbd> Jukebox</button>
         <button class="btn btn-ghost" data-act="mp"><kbd>M</kbd> Multiplayer</button>
@@ -121,6 +136,17 @@ export class SongSelectScreen {
       e.stopPropagation();
     });
     multiplayerClient.addEventListener(this.onMultiplayer);
+    myLevels.subscribe(() => this.onMyLevels());
+  }
+
+  /** Personal levels arrived or moved (library analysed, a run logged): rows ordered or filtered by them are rebuilt */
+  private onMyLevels(): void {
+    if (this.source === null) return;
+    if (this.sort === 'mine' || parseQuery(this.query).mine) this.applySearch(this.query);
+    else if (this.visible) {
+      this.renderWheel();
+      this.renderDetail();
+    }
   }
 
   private get searchInput(): HTMLInputElement {
@@ -194,7 +220,7 @@ export class SongSelectScreen {
     const keep = this.current;
     this.query = q;
     this.plays = getPlays();
-    this.list = buildRows(this.all, parseQuery(q), this.sort, this.plays);
+    this.list = buildRows(this.all, parseQuery(q), this.sort, this.plays, myLevelOf);
     this.index = keep ? Math.max(0, findRow(this.list, keep.entry.id, keep.meta.difficulty)) : 0;
     this.followRow();
     (this.root.querySelector('.search-count') as HTMLElement).textContent = `${this.list.length}`;
@@ -291,11 +317,11 @@ export class SongSelectScreen {
     this.broadcast();
   }
 
-  /** PgUp/PgDn: to the first row of the previous/next pack, or level when sorted by level */
+  /** PgUp/PgDn: to the first row of the previous/next pack, or level when sorted by one */
   private jumpGroup(dir: number): void {
     const n = this.list.length;
     if (n === 0) return;
-    const groupAt = (i: number) => groupOf(this.list[((i % n) + n) % n]!, this.sort, this.plays);
+    const groupAt = (i: number) => groupOf(this.list[((i % n) + n) % n]!, this.sort, this.plays, myLevelOf);
     const cur = groupAt(this.index);
     let i = this.index;
     for (let k = 0; k < n && groupAt(i) === cur; k++) i += dir;
@@ -587,6 +613,9 @@ export class SongSelectScreen {
       const level = el.querySelector('.wi-level') as HTMLElement;
       level.textContent = String(meta.level);
       level.dataset.diff = meta.difficulty;
+      const mine = myLevels.level(row.entry.id, meta.difficulty);
+      level.dataset.mine = mine === undefined ? '' : mine.toFixed(1);
+      level.dataset.shift = mine === undefined ? '' : shiftOf(mine, meta.level);
       const grade = el.querySelector('.wi-grade') as HTMLElement;
       grade.textContent = best?.grade ?? '';
       grade.dataset.grade = best?.grade ?? '';
@@ -658,9 +687,10 @@ export class SongSelectScreen {
         ${DIFFICULTY_ORDER.map((d) => {
           const c = entry.charts.find((x) => x.difficulty === d);
           const b = c ? getBest(entry.id, d) : null;
+          const m = c ? myLevels.level(entry.id, d) : undefined;
           const state = !c ? 'empty' : offered.has(d) ? '' : 'out';
           return `<button class="rung ${state} ${d === meta.difficulty ? 'active' : ''}" data-diff="${d}" ${state ? 'disabled' : ''} ${state === 'out' ? 'title="Outside the level filter"' : ''}>
-            <span class="rung-name">${d}</span><span class="rung-level">${c ? c.level : '–'}</span><span class="rung-grade" data-grade="${b?.grade ?? ''}">${b?.grade ?? ''}</span>
+            <span class="rung-name">${d}</span><span class="rung-level" ${c && m !== undefined ? `data-mine="${m.toFixed(1)}" data-shift="${shiftOf(m, c.level)}"` : ''}>${c ? c.level : '–'}</span><span class="rung-grade" data-grade="${b?.grade ?? ''}">${b?.grade ?? ''}</span>
           </button>`;
         }).join('')}
       </div>
@@ -671,6 +701,7 @@ export class SongSelectScreen {
             : '<div class="best-none">Not played yet. Clear it to set a record.</div>'}
           <div class="density-legend"></div>
         </div>
+        ${this.myLevelHtml(entry, meta)}
         <div class="density-wrap" title="Drag to pick a section to practice">
           <canvas class="density" aria-label="Note density over time"></canvas>
           <div class="density-range hidden"></div>
@@ -712,6 +743,25 @@ export class SongSelectScreen {
         })
         .catch((e) => console.warn(e));
     }
+  }
+
+  /** The personal level next to the chart's own, with the patterns behind it; while learning, how far along */
+  private myLevelHtml(entry: SongEntry, meta: ChartMeta): string {
+    const { ready, runs, runsNeeded } = myLevels.status;
+    if (!ready) {
+      const progress = runs < runsNeeded ? `${runs} of ${runsNeeded} runs played` : 'more errors needed to tell patterns apart';
+      return `<div class="my-level learning"><span class="ml-label">My level</span><span>Learning from your runs: ${progress}.</span></div>`;
+    }
+    const mine = myLevels.level(entry.id, meta.difficulty);
+    if (mine === undefined) return '';
+    const shift = shiftOf(mine, meta.level);
+    const gap = Math.abs(mine - meta.level).toFixed(1);
+    const verdict = shift === 'same' ? `in line with its ${meta.level}` : `${gap} ${shift} for you than its ${meta.level}`;
+    const traits = myLevels.traits(entry.id, meta.difficulty).map((t) => TRAIT_LABELS[t]);
+    return `<div class="my-level" data-shift="${shift}" title="Learned from where your runs break, pattern by pattern">
+      <span class="ml-label">My level</span><b>${mine.toFixed(1)}</b><span class="ml-verdict">${verdict}</span>
+      ${traits.length ? `<span class="ml-traits">${traits.join(' · ')}</span>` : ''}
+    </div>`;
   }
 
   /** Second pass once the simfile is parsed: length, density, radar, counts */

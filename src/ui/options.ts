@@ -1,5 +1,5 @@
 import type { Settings } from '../types';
-import { CMOD_OPTIONS, RATE_OPTIONS, RECEPTOR_STYLES, RECEPTOR_STYLE_LABELS } from '../types';
+import { CMOD_OPTIONS, EFFECTS, EFFECTS_LABELS, RATE_OPTIONS, RECEPTOR_STYLES, RECEPTOR_STYLE_LABELS } from '../types';
 
 // ============================================================================
 // Player options: what each one does, its hotkeys, one step of its value.
@@ -8,7 +8,7 @@ import { CMOD_OPTIONS, RATE_OPTIONS, RECEPTOR_STYLES, RECEPTOR_STYLE_LABELS } fr
 // the options panel. Hotkeys work from song select whether the panel is open or not.
 // ============================================================================
 
-export type OptionKind = 'speed' | 'offset' | 'perspective' | 'assist' | 'rate' | 'hitms' | 'focus' | 'receptors' | 'nohands';
+export type OptionKind = 'speed' | 'offset' | 'perspective' | 'assist' | 'rate' | 'hitms' | 'effects' | 'receptors' | 'nohands';
 export type OptionId = OptionKind | 'calibrate';
 
 export interface OptionDef {
@@ -44,7 +44,12 @@ export const OPTIONS: Record<OptionId, OptionDef> = {
   hitms: { label: 'Hit ms', keys: ['H'], hint: 'How early or late each hit was, under every judgment', value: (s) => (s.showHitMs ? 'Every hit' : 'Off') },
   perspective: { label: 'View', keys: ['P'], hint: 'Flat lanes, or a highway tilted into the distance', value: (s) => (s.perspective === 'flat' ? 'Classic' : 'Highway') },
   receptors: { label: 'Receptors', keys: ['R'], hint: 'Look of the arrows notes are judged against', value: (s) => RECEPTOR_STYLE_LABELS[s.receptorStyle] },
-  focus: { label: 'Effects', keys: ['V'], hint: 'Focus drops bloom, bursts and particles: only notes and receptors', value: (s) => (s.focus ? 'Focus' : 'Full') },
+  effects: {
+    label: 'Effects',
+    keys: ['V'],
+    hint: 'Focus drops bloom, bursts and particles: only notes and receptors. Night is Focus on a black background, menus included, everything dimmed',
+    value: (s) => EFFECTS_LABELS[s.effects],
+  },
   nohands: {
     label: 'No hands',
     keys: ['N'],
@@ -60,7 +65,7 @@ export const BAR_OPTIONS: OptionKind[] = ['speed', 'rate'];
 
 export const PANEL_GROUPS: { title: string; ids: OptionId[] }[] = [
   { title: 'Timing', ids: ['offset', 'calibrate', 'assist', 'hitms'] },
-  { title: 'Display', ids: ['perspective', 'receptors', 'focus'] },
+  { title: 'Display', ids: ['perspective', 'receptors', 'effects'] },
   { title: 'Chart', ids: ['nohands'] },
 ];
 
@@ -86,7 +91,7 @@ export function optionForKey(e: Pick<KeyboardEvent, 'code' | 'shiftKey'>): { id:
     case 'KeyH':
       return { id: 'hitms', dir: 1 };
     case 'KeyV':
-      return { id: 'focus', dir: 1 };
+      return { id: 'effects', dir: e.shiftKey ? -1 : 1 };
     case 'KeyR':
       return { id: 'receptors', dir: e.shiftKey ? -1 : 1 };
     case 'KeyN':
@@ -127,8 +132,8 @@ export function stepOption(settings: Settings, kind: OptionKind, dir: number): S
     case 'nohands':
       s.noHands = !s.noHands;
       break;
-    case 'focus':
-      s.focus = !s.focus;
+    case 'effects':
+      s.effects = EFFECTS[(EFFECTS.indexOf(s.effects) + dir + EFFECTS.length) % EFFECTS.length]!;
       break;
     case 'receptors': {
       const n = RECEPTOR_STYLES.length;

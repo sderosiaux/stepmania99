@@ -1,6 +1,7 @@
 import type { Song } from '../types';
 import { parseSimfile } from '../parser/simfile';
 import { MANIFEST_VERSION, type SongEntry, type SongManifest } from './manifest';
+import { PATTERNS_VERSION, unpackWindows, type PatternWindow, type PatternsFile } from './patterns';
 
 // ============================================================================
 // Songs: the manifest lists them all; a simfile is fetched and parsed only
@@ -31,6 +32,18 @@ export async function loadManifest(): Promise<SongEntry[]> {
     return [];
   }
   return manifest.songs;
+}
+
+/** Pattern windows of every chart, by `songId::difficulty`; empty when the scan predates them */
+export async function loadPatterns(): Promise<Map<string, PatternWindow[]>> {
+  const res = await fetch(`${BASE}songs/patterns.json`, { cache: 'no-cache' });
+  if (!res.ok) return new Map();
+  const file = (await res.json()) as PatternsFile;
+  if (file.version !== PATTERNS_VERSION) {
+    console.warn('Chart patterns are outdated: run `npm run scan-songs`');
+    return new Map();
+  }
+  return new Map(Object.entries(file.charts).map(([key, packed]) => [key, unpackWindows(packed)]));
 }
 
 export function loadSong(entry: SongEntry): Promise<Song> {

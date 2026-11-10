@@ -52,3 +52,15 @@ One arrow per 15 combo, enforced by the server with a per-player milestone that 
 ## Still true from the first version
 
 TypeScript strict with `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`. No UI framework: the screens are small and the hot path is WebGL.
+
+## My level: a second scale, learned from where runs break
+
+The chart's own level stays as written. A personal level sits next to it, on the same scale, and says how hard the chart is for this player.
+
+The reason is in the play history. On 42 logged runs, the original level ranks charts by break rate (good, boo, miss) with a Spearman correlation of 0.56: community packs don't share a scale, and a level can't know which patterns a given player handles. The personal level reaches 0.78 on the same runs, each chart rated by a model that never saw it.
+
+A chart is cut into windows of about 64 notes, each described by seven numbers: speed, jacks, jumps, hands, holds that pin the other finger of the hand, stamina, rhythm changes. Lanes 0-1 are one hand and 2-3 the other, as on S D K L. A run logs its breaks per window, and a logistic regression learns the break rate from the seven numbers, so the weights are the player's own. A chart's risk is the predicted rate over its hardest quarter of windows: a long easy chart with one wall should rate as the wall. Risks are then ranked across the library and read on the distribution of the original levels. A 12 keeps its usual weight, and a player who gets better at everything sees no drift, because only the relative cost of patterns moves a chart.
+
+We turned down a fixed formula in the style of Etterna's MSD: it is not personal and its weights would be guesses. Regressing each chart's best score was the other candidate, with 38 points to fit 7 weights where windows give about 800.
+
+There is no personal level below 10 usable runs and 150 breaks. Autoplay, practice, battles, other rates and No hands are not logged. A failed run counts the windows before the one it died in. A feature can change (bump `PATTERNS_VERSION`) without losing the run log, which stores breaks per window and no features; changing the window size would lose it.
